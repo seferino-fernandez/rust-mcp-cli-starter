@@ -1,0 +1,32 @@
+[package]
+name = "myapp-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Terminal CLI for the MYAPP API"
+readme = "README.md"
+
+[[bin]]
+name = "myapp"
+path = "src/main.rs"
+
+[dependencies]
+myapp-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+clap = { workspace = true }
+comfy-table = "7.2.2"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+
+[lints]
+workspace = true

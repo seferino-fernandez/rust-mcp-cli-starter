@@ -1,0 +1,17 @@
+name: myapp-mcp
+
+services:
+    myapp-mcp:
+        build:
+            context: ..
+            dockerfile: Dockerfile
+        # image: ghcr.io/your-org/myapp-mcp:latest
+        container_name: myapp-mcp
+        ports:
+            - "8080:8080"
+        environment:
+            MYAPP_MCP_AUTH_MODE: token
+            MYAPP_MCP_TOKEN:
+            MYAPP_BASE_URL:
+            MYAPP_API_KEY:
+        restart: unless-stopped

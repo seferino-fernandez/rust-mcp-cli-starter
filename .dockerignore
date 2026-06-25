@@ -1,0 +1,13 @@
+# Rust and Cargo
+debug/
+target/
+.git/
+.github/
+**/*.rs.bk
+*.pdb
+.vscode/
+.editorconfig
+
+# Not needed to build the binary.
+docs/
+deploy/

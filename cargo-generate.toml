@@ -1,0 +1,11 @@
+[template]
+cargo_generate_version = ">=0.21.0"
+# Files/dirs not copied into generated projects.
+# `pre-script.rhai` and `cargo-generate.toml` are template machinery, so they
+# are excluded here so neither appears in the user's generated project.
+# (cargo-generate auto-removes `cargo-generate.toml`, but we list it
+# explicitly for clarity.)
+ignore = ["target", "pre-script.rhai", "cargo-generate.toml"]
+
+[hooks]
+pre = ["pre-script.rhai"]
