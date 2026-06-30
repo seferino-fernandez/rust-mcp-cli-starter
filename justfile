@@ -33,6 +33,14 @@ completions shell="zsh":
 completions-mcp shell="zsh":
     cargo run --quiet -p myapp-mcp -- completions {{shell}}
 
+# Generate man pages for the CLI into <dir> (created if missing; default ./man)
+man dir="man":
+    cargo run --quiet -p myapp-cli -- man {{dir}}
+
+# Generate man pages for the MCP server into <dir> (created if missing; default ./man)
+man-mcp dir="man":
+    cargo run --quiet -p myapp-mcp -- man {{dir}}
+
 # Install both the CLI and MCP server in parallel
 [parallel]
 install: install-cli install-mcp

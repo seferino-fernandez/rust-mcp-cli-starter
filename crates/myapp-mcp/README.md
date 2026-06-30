@@ -65,6 +65,16 @@ echo 'source <(COMPLETE=zsh myapp-mcp)' >> ~/.zshrc
 
 Running `myapp-mcp` with no subcommand still starts the server as usual.
 
+## Man pages
+
+Generate ROFF man pages for the server and every subcommand into a directory
+(created if missing):
+
+```bash
+myapp-mcp man ./man
+man -l ./man/myapp-mcp.1
+```
+
 ## Configuration
 
 Config file default: `~/.config/myapp/config.toml` (or `--config` / `MYAPP_CONFIG`).

@@ -10,6 +10,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+mod commands;
 mod config;
 mod http;
 mod middleware;
@@ -21,8 +22,10 @@ mod tools;
 use std::io::stderr;
 
 use clap::{CommandFactory, Parser};
-use clap_complete::{CompleteEnv, generate};
+use clap_complete::CompleteEnv;
 use shared::{Args, Command};
+
+use crate::commands::{completions, man};
 
 use crate::config::ServerConfig;
 
@@ -36,9 +39,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Static completion scripts need no config, so emit and return early.
     if let Some(Command::Completions { shell }) = &args.command {
-        let mut cmd = Args::command();
-        let bin_name = cmd.get_name().to_string();
-        generate(*shell, &mut cmd, bin_name, &mut std::io::stdout());
+        completions::run(*shell, Args::command());
+        return Ok(());
+    }
+
+    // Man pages need no config, so emit and return early.
+    if let Some(Command::Man { out_dir }) = &args.command {
+        man::run(Args::command(), out_dir)?;
         return Ok(());
     }
 

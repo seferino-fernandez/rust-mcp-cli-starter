@@ -47,7 +47,7 @@ Configuration is layered, highest precedence first:
 CLI flag, then `MYAPP_*` env, then `MYAPP_*_FILE` env, then `config.toml`, then
 built-in defaults. See [`config.toml.example`](config.toml.example) for every setting.
 
-## Logging verbosity
+## Logging and verbosity flag
 
 Both binaries take `-v`/`--verbose` and `-q`/`--quiet` flags. By default only
 errors are reported; repeat `-v` to step up:
@@ -83,6 +83,20 @@ echo 'COMPLETE=fish myapp | source'  >> ~/.config/fish/completions/myapp.fish  #
 
 Dynamic completions re-generate on shell startup, so they stay correct as the CLI
 changes — re-source (a new shell session) after upgrading `myapp`.
+
+## Man pages
+
+The `myapp` CLI generates ROFF man pages for itself and every subcommand into a
+directory (created if missing):
+
+```bash
+# Generate into ./man, then preview one
+myapp man ./man
+man -l ./man/myapp.1
+
+# Install system-wide (Linux example)
+myapp man ~/.local/share/man/man1
+```
 
 ## MCP server
 

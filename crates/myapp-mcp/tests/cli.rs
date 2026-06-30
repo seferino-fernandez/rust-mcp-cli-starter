@@ -25,6 +25,17 @@ fn completions_generates_static_script() {
 }
 
 #[test]
+fn man_generates_pages() {
+    let dir = std::env::temp_dir().join(format!("myapp-mcp-man-test-{}", std::process::id()));
+    Command::cargo_bin("myapp-mcp")
+        .unwrap()
+        .args(["man", dir.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(dir.join("myapp-mcp.1").exists());
+}
+
+#[test]
 fn dynamic_completion_registration() {
     // With COMPLETE set and no completion args, the binary prints its registration script.
     Command::cargo_bin("myapp-mcp")

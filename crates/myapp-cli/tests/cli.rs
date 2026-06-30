@@ -36,6 +36,17 @@ fn dynamic_completion_registration() {
 }
 
 #[test]
+fn man_generates_pages() {
+    let dir = std::env::temp_dir().join(format!("myapp-man-test-{}", std::process::id()));
+    Command::cargo_bin("myapp")
+        .unwrap()
+        .args(["man", dir.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(dir.join("myapp.1").exists());
+}
+
+#[test]
 fn help_lists_verbosity_flags() {
     Command::cargo_bin("myapp")
         .unwrap()

@@ -71,6 +71,11 @@ pub enum Command {
         /// Shell to generate the completion script for.
         shell: Shell,
     },
+    /// Generate man pages for the server and all subcommands into <OUT_DIR>.
+    Man {
+        /// Directory to write the generated man pages into (created if missing).
+        out_dir: std::path::PathBuf,
+    },
 }
 
 /// Applies CLI overrides onto a loaded [`ServerConfig`](crate::config::ServerConfig).

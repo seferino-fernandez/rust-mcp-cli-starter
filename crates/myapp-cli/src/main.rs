@@ -8,12 +8,12 @@ mod output;
 mod utils;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{CompleteEnv, Shell, generate};
+use clap_complete::{CompleteEnv, Shell};
 use clap_verbosity_flag::Verbosity;
 use output::OutputFormat;
 use std::path::PathBuf;
 
-use crate::commands::{item, status};
+use crate::commands::{completions, item, man, status};
 use crate::utils::client;
 
 #[derive(Parser)]
@@ -62,6 +62,11 @@ enum Command {
         /// Shell to generate the completion script for.
         shell: Shell,
     },
+    /// Generate man pages for the CLI and all subcommands into <OUT_DIR>.
+    Man {
+        /// Directory to write the generated man pages into (created if missing).
+        out_dir: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -81,9 +86,13 @@ async fn try_main() -> anyhow::Result<()> {
 
     // Static completion scripts need no config or API client, so emit and return early.
     if let Command::Completions { shell } = &cli.command {
-        let mut cmd = Cli::command();
-        let bin_name = cmd.get_name().to_string();
-        generate(*shell, &mut cmd, bin_name, &mut std::io::stdout());
+        completions::run(*shell, Cli::command());
+        return Ok(());
+    }
+
+    // Man pages need no config or API client, so emit and return early.
+    if let Command::Man { out_dir } = &cli.command {
+        man::run(Cli::command(), out_dir)?;
         return Ok(());
     }
 
@@ -107,7 +116,7 @@ async fn try_main() -> anyhow::Result<()> {
     match &cli.command {
         Command::Status => status::run(&client, cli.output).await,
         Command::Item { command } => item::run(command, &client, cli.output).await,
-        // Handled by the early return above; the client is never built for it.
-        Command::Completions { .. } => Ok(()),
+        // Handled by the early returns above; the client is never built for them.
+        Command::Completions { .. } | Command::Man { .. } => Ok(()),
     }
 }
