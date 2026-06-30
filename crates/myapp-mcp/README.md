@@ -52,12 +52,13 @@ config / `MYAPP_LOG_LEVEL` still apply when no flag is given.
 
 ## Shell completions
 
-`myapp-mcp` supports both static and dynamic shell completions (bash, zsh, fish,
-elvish, powershell).
+`myapp-mcp` supports static completions for bash, elvish, fish, nushell,
+powershell, and zsh, plus dynamic completions for every shell except nushell.
 
 ```bash
 # Static: generate a script and install it where your shell looks for it
-myapp-mcp completions zsh > ~/.zsh/completions/_myapp-mcp
+myapp-mcp completions zsh     > ~/.zsh/completions/_myapp-mcp
+myapp-mcp completions nushell > ~/.config/nushell/completions/myapp-mcp.nu
 
 # Dynamic: let the binary drive completions at runtime (re-source after upgrades)
 echo 'source <(COMPLETE=zsh myapp-mcp)' >> ~/.zshrc

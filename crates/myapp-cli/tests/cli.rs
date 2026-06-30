@@ -36,6 +36,16 @@ fn dynamic_completion_registration() {
 }
 
 #[test]
+fn completions_generates_nushell_script() {
+    Command::cargo_bin("myapp")
+        .unwrap()
+        .args(["completions", "nushell"])
+        .assert()
+        .success()
+        .stdout(contains("export extern myapp"));
+}
+
+#[test]
 fn man_generates_pages() {
     let dir = std::env::temp_dir().join(format!("myapp-man-test-{}", std::process::id()));
     Command::cargo_bin("myapp")

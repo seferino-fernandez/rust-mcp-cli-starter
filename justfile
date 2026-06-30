@@ -25,11 +25,11 @@ format:
 build:
     cargo build
 
-# Print a static CLI completion script (bash|zsh|fish|elvish|powershell); redirect to install
+# Print a static CLI completion script (bash|elvish|fish|nushell|powershell|zsh); redirect to install
 completions shell="zsh":
     cargo run --quiet -p myapp-cli -- completions {{shell}}
 
-# Print a static MCP-server completion script (bash|zsh|fish|elvish|powershell); redirect to install
+# Print a static MCP-server completion script (bash|elvish|fish|nushell|powershell|zsh); redirect to install
 completions-mcp shell="zsh":
     cargo run --quiet -p myapp-mcp -- completions {{shell}}
 

@@ -61,15 +61,16 @@ overrides these flags entirely (e.g. `RUST_LOG=myapp_core=trace,reqwest=debug`).
 
 ## Shell completions
 
-The `myapp` CLI supports both static and dynamic shell completions (bash, zsh,
-fish, elvish, powershell).
+The `myapp` CLI supports static completions for bash, elvish, fish, nushell,
+powershell, and zsh, plus dynamic completions for every shell except nushell.
 
 **Static** — generate a script once and install it where your shell looks for it:
 
 ```bash
-myapp completions zsh  > ~/.zsh/completions/_myapp
-myapp completions bash | sudo tee /usr/share/bash-completion/completions/myapp
-myapp completions fish > ~/.config/fish/completions/myapp.fish
+myapp completions zsh     > ~/.zsh/completions/_myapp
+myapp completions bash    | sudo tee /usr/share/bash-completion/completions/myapp
+myapp completions fish    > ~/.config/fish/completions/myapp.fish
+myapp completions nushell > ~/.config/nushell/completions/myapp.nu  # then `source` it
 ```
 
 **Dynamic** — let the binary drive completions at runtime via the `COMPLETE`

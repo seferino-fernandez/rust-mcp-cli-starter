@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
-use clap_complete::Shell;
 use clap_verbosity_flag::Verbosity;
+
+use crate::commands::completions::CompletionShell;
 
 use crate::config::ServerConfig;
 
@@ -66,10 +67,11 @@ pub struct Args {
 /// Subcommands for the MCP server binary.
 #[derive(Subcommand)]
 pub enum Command {
-    /// Generate a shell completion script (bash, zsh, fish, elvish, powershell).
+    /// Generate a shell completion script (bash, elvish, fish, nushell,
+    /// powershell, zsh).
     Completions {
         /// Shell to generate the completion script for.
-        shell: Shell,
+        shell: CompletionShell,
     },
     /// Generate man pages for the server and all subcommands into <OUT_DIR>.
     Man {

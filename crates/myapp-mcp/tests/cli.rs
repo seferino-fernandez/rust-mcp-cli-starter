@@ -25,6 +25,16 @@ fn completions_generates_static_script() {
 }
 
 #[test]
+fn completions_generates_nushell_script() {
+    Command::cargo_bin("myapp-mcp")
+        .unwrap()
+        .args(["completions", "nushell"])
+        .assert()
+        .success()
+        .stdout(contains("export extern myapp-mcp"));
+}
+
+#[test]
 fn man_generates_pages() {
     let dir = std::env::temp_dir().join(format!("myapp-mcp-man-test-{}", std::process::id()));
     Command::cargo_bin("myapp-mcp")

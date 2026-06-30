@@ -8,7 +8,7 @@ mod output;
 mod utils;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{CompleteEnv, Shell};
+use clap_complete::CompleteEnv;
 use clap_verbosity_flag::Verbosity;
 use output::OutputFormat;
 use std::path::PathBuf;
@@ -57,10 +57,11 @@ enum Command {
         #[command(subcommand)]
         command: item::ItemCommand,
     },
-    /// Generate a shell completion script (bash, zsh, fish, elvish, powershell).
+    /// Generate a shell completion script (bash, elvish, fish, nushell,
+    /// powershell, zsh).
     Completions {
         /// Shell to generate the completion script for.
-        shell: Shell,
+        shell: completions::CompletionShell,
     },
     /// Generate man pages for the CLI and all subcommands into <OUT_DIR>.
     Man {
