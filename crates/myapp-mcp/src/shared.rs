@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
+use clap_verbosity_flag::Verbosity;
 
 use crate::config::ServerConfig;
 
@@ -22,6 +23,12 @@ pub struct Args {
     /// Transport: "stdio" or "http".
     #[arg(long, default_value = "stdio", value_parser = ["stdio", "http"])]
     pub transport: String,
+
+    /// Logging verbosity. Default reports only errors; `-v` warn, `-vv` info,
+    /// `-vvv` debug, `-vvvv` trace; `-q` silences output. When passed, overrides
+    /// the configured `log.level`; `RUST_LOG` still overrides everything.
+    #[command(flatten)]
+    pub verbosity: Verbosity,
 
     /// Override the upstream base URL.
     #[arg(long)]

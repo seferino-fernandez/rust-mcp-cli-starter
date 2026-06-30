@@ -9,6 +9,7 @@ mod utils;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{CompleteEnv, Shell, generate};
+use clap_verbosity_flag::Verbosity;
 use output::OutputFormat;
 use std::path::PathBuf;
 
@@ -39,6 +40,12 @@ struct Cli {
     /// listings (e.g. `ps`).
     #[arg(long, global = true)]
     api_key: Option<String>,
+
+    /// Logging verbosity. Default reports only errors; `-v` warn, `-vv` info,
+    /// `-vvv` debug, `-vvvv` trace; `-q` silences output. Place before the
+    /// subcommand: `myapp -v status`. `RUST_LOG` overrides these flags.
+    #[command(flatten)]
+    verbosity: Verbosity,
 }
 
 #[derive(Subcommand)]
@@ -80,10 +87,13 @@ async fn try_main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `-v`/`-q` set the default level; `RUST_LOG` still overrides when set.
+    let level = cli.verbosity.tracing_level_filter();
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("myapp_core=info")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new(format!("myapp_core={level}"))
+            }),
         )
         .with_writer(std::io::stderr)
         .init();

@@ -30,6 +30,16 @@ myapp-mcp --transport http --auth-mode token --token my-secret
 myapp-mcp --transport http --auth-mode oauth --port 8080
 ```
 
+## Logging verbosity
+
+`-v`/`--verbose` and `-q`/`--quiet` adjust the log level (`-q` silent; `-v` warn,
+`-vv` info, `-vvv` debug, `-vvvv` trace). Default level precedence, highest first:
+
+`RUST_LOG` → `-v`/`-q` (when passed) → `MYAPP_LOG_LEVEL` / config `log.level` → default (`info`)
+
+So `myapp-mcp -q --transport stdio` quiets a run without touching config, while
+config / `MYAPP_LOG_LEVEL` still apply when no flag is given.
+
 ## Example tools
 
 | Tool                | Description                                 |

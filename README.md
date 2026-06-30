@@ -47,6 +47,18 @@ Configuration is layered, highest precedence first:
 CLI flag, then `MYAPP_*` env, then `MYAPP_*_FILE` env, then `config.toml`, then
 built-in defaults. See [`config.toml.example`](config.toml.example) for every setting.
 
+## Logging verbosity
+
+Both binaries take `-v`/`--verbose` and `-q`/`--quiet` flags. By default only
+errors are reported; repeat `-v` to step up:
+
+- `-q` silent
+- (default) errors only
+- `-v` warn, `-vv` info, `-vvv` debug, `-vvvv` trace
+
+Place the flag before the subcommand: `myapp -v status`. Setting `RUST_LOG`
+overrides these flags entirely (e.g. `RUST_LOG=myapp_core=trace,reqwest=debug`).
+
 ## Shell completions
 
 The `myapp` CLI supports both static and dynamic shell completions (bash, zsh,

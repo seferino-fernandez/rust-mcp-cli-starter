@@ -36,6 +36,26 @@ fn dynamic_completion_registration() {
 }
 
 #[test]
+fn help_lists_verbosity_flags() {
+    Command::cargo_bin("myapp")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains("--verbose").and(contains("--quiet")));
+}
+
+#[test]
+fn verbosity_flag_parses() {
+    // `-v` parses on the top-level command; completions short-circuit before any client.
+    Command::cargo_bin("myapp")
+        .unwrap()
+        .args(["-v", "completions", "bash"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn missing_api_key_errors_clearly() {
     // No key from any source → build_client fails with a clear message.
     Command::cargo_bin("myapp")

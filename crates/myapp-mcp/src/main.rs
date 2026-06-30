@@ -44,11 +44,17 @@ async fn main() -> anyhow::Result<()> {
 
     let mut config = ServerConfig::load(args.config.as_deref())?;
 
+    // Default level precedence: explicit `-v`/`-q` overrides config `log.level`;
+    // `RUST_LOG` (via `try_from_default_env`) still overrides everything.
+    let level = if args.verbosity.is_present() {
+        args.verbosity.tracing_level_filter().to_string()
+    } else {
+        config.core.log.level.clone()
+    };
     tracing_subscriber::fmt()
         .with_writer(stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                let level = &config.core.log.level;
                 tracing_subscriber::EnvFilter::new(format!(
                     "myapp_core={level},myapp_mcp={level},rmcp={level}"
                 ))
