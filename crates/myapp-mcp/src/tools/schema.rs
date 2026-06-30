@@ -1,7 +1,7 @@
 //! Schema post-processing: close every object schema so MCP tool inputs reject
 //! unexpected properties, and a response-size guard helper.
 
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Map, Value};
 
 /// Recursively sets `additionalProperties: false` on every object schema node
@@ -71,7 +71,7 @@ pub fn enforce_response_budget(result: CallToolResult, max_bytes: usize) -> Call
         "limit": max_bytes,
         "hint": "narrow the query (smaller page size, fewer results, or a more specific filter)"
     });
-    let mut replacement = CallToolResult::success(vec![Content::text(body.to_string())]);
+    let mut replacement = CallToolResult::success(vec![ContentBlock::text(body.to_string())]);
     replacement.is_error = was_error;
     replacement
 }
@@ -232,11 +232,12 @@ mod router_tests {
 #[cfg(test)]
 mod budget_tests {
     use super::enforce_response_budget;
-    use rmcp::model::{CallToolResult, Content};
+    use rmcp::model::{CallToolResult, ContentBlock};
 
     #[test]
     fn passes_small_results_through() {
-        let original = CallToolResult::success(vec![Content::text("{\"ok\":true}".to_string())]);
+        let original =
+            CallToolResult::success(vec![ContentBlock::text("{\"ok\":true}".to_string())]);
         let guarded = enforce_response_budget(original, 1024);
         let text = serde_json::to_string(&guarded.content).unwrap();
         assert!(text.contains("ok"));
@@ -245,7 +246,7 @@ mod budget_tests {
     #[test]
     fn replaces_oversized_results() {
         let big = "x".repeat(2048);
-        let original = CallToolResult::success(vec![Content::text(big)]);
+        let original = CallToolResult::success(vec![ContentBlock::text(big)]);
         let guarded = enforce_response_budget(original, 256);
         let text = serde_json::to_string(&guarded.content).unwrap();
         assert!(text.contains("response_too_large"), "got: {text}");
@@ -275,7 +276,7 @@ mod budget_tests {
 
     #[test]
     fn preserves_error_flag_on_replacement() {
-        let mut original = CallToolResult::success(vec![Content::text("x".repeat(2048))]);
+        let mut original = CallToolResult::success(vec![ContentBlock::text("x".repeat(2048))]);
         original.is_error = Some(true);
         let guarded = enforce_response_budget(original, 256);
         assert_eq!(

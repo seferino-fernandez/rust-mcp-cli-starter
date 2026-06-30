@@ -1,4 +1,4 @@
-# myapp
+# Rust MCP + CLI Template
 
 A [`cargo-generate`](https://cargo-generate.github.io/cargo-generate/) starter
 template for wrapping an HTTP API as three Rust crates: a library, a CLI, and an
