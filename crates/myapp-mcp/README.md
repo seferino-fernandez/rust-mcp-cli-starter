@@ -40,6 +40,21 @@ myapp-mcp --transport http --auth-mode oauth --port 8080
 | `create_item`       | Create an item (`name`, `enabled`)          |
 | `delete_item`       | Delete an item by `id`                      |
 
+## Shell completions
+
+`myapp-mcp` supports both static and dynamic shell completions (bash, zsh, fish,
+elvish, powershell).
+
+```bash
+# Static: generate a script and install it where your shell looks for it
+myapp-mcp completions zsh > ~/.zsh/completions/_myapp-mcp
+
+# Dynamic: let the binary drive completions at runtime (re-source after upgrades)
+echo 'source <(COMPLETE=zsh myapp-mcp)' >> ~/.zshrc
+```
+
+Running `myapp-mcp` with no subcommand still starts the server as usual.
+
 ## Configuration
 
 Config file default: `~/.config/myapp/config.toml` (or `--config` / `MYAPP_CONFIG`).

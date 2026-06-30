@@ -7,7 +7,8 @@ mod commands;
 mod output;
 mod utils;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{CompleteEnv, Shell, generate};
 use output::OutputFormat;
 use std::path::PathBuf;
 
@@ -49,10 +50,19 @@ enum Command {
         #[command(subcommand)]
         command: item::ItemCommand,
     },
+    /// Generate a shell completion script (bash, zsh, fish, elvish, powershell).
+    Completions {
+        /// Shell to generate the completion script for.
+        shell: Shell,
+    },
 }
 
 #[tokio::main]
 async fn main() {
+    // Dynamic completions: `COMPLETE=<shell> myapp`. A no-op for normal runs; exits
+    // the process when handling a completion request, so it must precede any stdout use.
+    CompleteEnv::with_factory(Cli::command).complete();
+
     if let Err(error) = try_main().await {
         eprintln!("myapp: {error:#}");
         std::process::exit(1);
@@ -61,6 +71,14 @@ async fn main() {
 
 async fn try_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Static completion scripts need no config or API client, so emit and return early.
+    if let Command::Completions { shell } = &cli.command {
+        let mut cmd = Cli::command();
+        let bin_name = cmd.get_name().to_string();
+        generate(*shell, &mut cmd, bin_name, &mut std::io::stdout());
+        return Ok(());
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -79,5 +97,7 @@ async fn try_main() -> anyhow::Result<()> {
     match &cli.command {
         Command::Status => status::run(&client, cli.output).await,
         Command::Item { command } => item::run(command, &client, cli.output).await,
+        // Handled by the early return above; the client is never built for it.
+        Command::Completions { .. } => Ok(()),
     }
 }

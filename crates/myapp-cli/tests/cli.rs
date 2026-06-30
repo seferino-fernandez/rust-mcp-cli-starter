@@ -15,6 +15,27 @@ fn help_lists_subcommands() {
 }
 
 #[test]
+fn completions_generates_static_script() {
+    Command::cargo_bin("myapp")
+        .unwrap()
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(contains("myapp"));
+}
+
+#[test]
+fn dynamic_completion_registration() {
+    // With COMPLETE set and no completion args, the binary prints its registration script.
+    Command::cargo_bin("myapp")
+        .unwrap()
+        .env("COMPLETE", "bash")
+        .assert()
+        .success()
+        .stdout(contains("COMPLETE"));
+}
+
+#[test]
 fn missing_api_key_errors_clearly() {
     // No key from any source → build_client fails with a clear message.
     Command::cargo_bin("myapp")

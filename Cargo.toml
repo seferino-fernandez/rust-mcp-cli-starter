@@ -30,6 +30,7 @@ anyhow = "1.0.103"
 toml = "1.1.2"
 schemars = { version = "1.2.1", features = ["uuid1"] }
 clap = { version = "4.6.1", features = ["derive"] }
+clap_complete = { version = "4.6.6", features = ["unstable-dynamic"] }
 
 [profile.release]
 opt-level = "z"   # Optimize for size.

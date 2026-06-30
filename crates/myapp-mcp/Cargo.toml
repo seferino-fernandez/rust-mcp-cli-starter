@@ -25,6 +25,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 clap = { workspace = true }
+clap_complete = { workspace = true }
 rmcp = { version = "2.0.0", features = [
     "server",
     "transport-io",
@@ -46,6 +47,8 @@ tower-http = { version = "0.7.0", features = ["cors"] }
 [dev-dependencies]
 tower = "0.5.3"
 url = "2.5.8"
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
 
 [lints]
 workspace = true

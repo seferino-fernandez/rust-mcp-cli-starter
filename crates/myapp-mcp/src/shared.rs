@@ -1,4 +1,5 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use clap_complete::Shell;
 
 use crate::config::ServerConfig;
 
@@ -10,6 +11,10 @@ use crate::config::ServerConfig;
     version
 )]
 pub struct Args {
+    /// Optional subcommand. When omitted, the MCP server runs.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Path to config.toml.
     #[arg(long, value_name = "PATH")]
     pub config: Option<std::path::PathBuf>,
@@ -49,6 +54,16 @@ pub struct Args {
     /// PIN required on the OAuth consent screen [env: MYAPP_MCP_OAUTH_PIN].
     #[arg(long)]
     pub oauth_pin: Option<String>,
+}
+
+/// Subcommands for the MCP server binary.
+#[derive(Subcommand)]
+pub enum Command {
+    /// Generate a shell completion script (bash, zsh, fish, elvish, powershell).
+    Completions {
+        /// Shell to generate the completion script for.
+        shell: Shell,
+    },
 }
 
 /// Applies CLI overrides onto a loaded [`ServerConfig`](crate::config::ServerConfig).

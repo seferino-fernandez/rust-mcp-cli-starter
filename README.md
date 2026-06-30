@@ -47,6 +47,31 @@ Configuration is layered, highest precedence first:
 CLI flag, then `MYAPP_*` env, then `MYAPP_*_FILE` env, then `config.toml`, then
 built-in defaults. See [`config.toml.example`](config.toml.example) for every setting.
 
+## Shell completions
+
+The `myapp` CLI supports both static and dynamic shell completions (bash, zsh,
+fish, elvish, powershell).
+
+**Static** — generate a script once and install it where your shell looks for it:
+
+```bash
+myapp completions zsh  > ~/.zsh/completions/_myapp
+myapp completions bash | sudo tee /usr/share/bash-completion/completions/myapp
+myapp completions fish > ~/.config/fish/completions/myapp.fish
+```
+
+**Dynamic** — let the binary drive completions at runtime via the `COMPLETE`
+environment variable. Add one line to your shell startup file:
+
+```bash
+echo 'source <(COMPLETE=zsh myapp)'  >> ~/.zshrc    # zsh
+echo 'source <(COMPLETE=bash myapp)' >> ~/.bashrc   # bash
+echo 'COMPLETE=fish myapp | source'  >> ~/.config/fish/completions/myapp.fish  # fish
+```
+
+Dynamic completions re-generate on shell startup, so they stay correct as the CLI
+changes — re-source (a new shell session) after upgrading `myapp`.
+
 ## MCP server
 
 `myapp-mcp` exposes the same API to LLM clients over two transports:
