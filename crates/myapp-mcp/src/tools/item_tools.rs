@@ -15,7 +15,12 @@ impl AppTools {
     #[tool(
         name = "get_system_status",
         description = "Get server health/status",
-        annotations(read_only_hint = true, open_world_hint = false)
+        annotations(
+            title = "Get system status",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_system_status(&self) -> Result<Json<SystemStatus>, String> {
         let status = self
@@ -29,7 +34,12 @@ impl AppTools {
     #[tool(
         name = "list_items",
         description = "List items (paginated)",
-        annotations(read_only_hint = true, open_world_hint = false)
+        annotations(
+            title = "List items",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn list_items(
         &self,
@@ -51,7 +61,12 @@ impl AppTools {
     #[tool(
         name = "get_item",
         description = "Get a single item by id",
-        annotations(read_only_hint = true, open_world_hint = false)
+        annotations(
+            title = "Get item",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_item(
         &self,
@@ -68,7 +83,13 @@ impl AppTools {
     #[tool(
         name = "create_item",
         description = "Create an item",
-        annotations(read_only_hint = false, open_world_hint = false)
+        annotations(
+            title = "Create item",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_item(
         &self,
@@ -88,7 +109,13 @@ impl AppTools {
     #[tool(
         name = "delete_item",
         description = "Delete an item by id",
-        annotations(read_only_hint = false, open_world_hint = false)
+        annotations(
+            title = "Delete item",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn delete_item(
         &self,

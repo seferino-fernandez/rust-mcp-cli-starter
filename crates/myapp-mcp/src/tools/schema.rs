@@ -227,6 +227,68 @@ mod router_tests {
             );
         }
     }
+
+    #[test]
+    fn tool_annotations_are_complete() {
+        let config = Config {
+            api_key: Some(myapp_core::SecretString::from("test-key")),
+            ..Config::default()
+        };
+        let client = ApiClient::new(config).expect("config with api key builds a client");
+        let tools = AppTools::new(client, 1024 * 1024);
+        for tool in tools.tool_router.list_all() {
+            let ann = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("tool {} must have annotations", tool.name));
+            assert!(
+                ann.title.as_ref().is_some_and(|t| !t.is_empty()),
+                "tool {} must have a non-empty title",
+                tool.name
+            );
+            match tool.name.as_ref() {
+                "get_system_status" | "list_items" | "get_item" => {
+                    assert_eq!(
+                        ann.idempotent_hint,
+                        Some(true),
+                        "{} must be marked idempotent",
+                        tool.name
+                    );
+                    assert_eq!(
+                        ann.read_only_hint,
+                        Some(true),
+                        "{} must be marked read-only",
+                        tool.name
+                    );
+                }
+                "create_item" => {
+                    assert_eq!(
+                        ann.destructive_hint,
+                        Some(false),
+                        "create_item must not be marked destructive"
+                    );
+                    assert_eq!(
+                        ann.idempotent_hint,
+                        Some(false),
+                        "create_item must not be marked idempotent"
+                    );
+                }
+                "delete_item" => {
+                    assert_eq!(
+                        ann.destructive_hint,
+                        Some(true),
+                        "delete_item must be marked destructive"
+                    );
+                    assert_eq!(
+                        ann.idempotent_hint,
+                        Some(true),
+                        "delete_item must be marked idempotent"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]

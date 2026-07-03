@@ -21,8 +21,18 @@ use rmcp::transport::streamable_http_server::{
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
-    let addr: std::net::SocketAddr = format!("{}:{}", config.mcp.host, config.mcp.port).parse()?;
+/// Validates that the configured auth mode is safe for the bind address before
+/// the server starts, failing fast with an actionable message otherwise.
+///
+/// - `token`: a token must be present.
+/// - `none`: only allowed on a loopback address.
+/// - `oauth`: refuses a wildcard CORS origin (any site could drive the flow) and
+///   refuses plain HTTP on a non-loopback address (tokens/PKCE would traverse
+///   the network unencrypted) unless `oauth_allow_insecure_http` is set.
+fn validate_transport_security(
+    config: &ServerConfig,
+    addr: &std::net::SocketAddr,
+) -> anyhow::Result<()> {
     match config.mcp.auth_mode.as_str() {
         "token" => {
             if config.mcp.token.is_none() {
@@ -40,9 +50,39 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
                 );
             }
         }
-        "oauth" => {}
+        "oauth" => {
+            if config
+                .mcp
+                .oauth_cors
+                .origins
+                .iter()
+                .any(|origin| origin == "*")
+            {
+                anyhow::bail!(
+                    "auth_mode=\"oauth\" refuses a wildcard CORS origin (\"*\"): it would let any \
+                     website drive the OAuth flow. Set [mcp.oauth_cors] origins to an explicit \
+                     allow-list."
+                );
+            }
+            let base_url = resolve_base_url(config, addr);
+            let plaintext = !base_url.starts_with("https://");
+            if plaintext && !addr.ip().is_loopback() && !config.mcp.oauth_allow_insecure_http {
+                anyhow::bail!(
+                    "auth_mode=\"oauth\" over plain HTTP on a non-loopback address ({addr}) is \
+                     refused: OAuth tokens and PKCE would traverse the network unencrypted. Serve \
+                     HTTPS (set [mcp] base_url to an https:// URL) or, on a trusted private \
+                     network, set [mcp] oauth_allow_insecure_http = true."
+                );
+            }
+        }
         other => anyhow::bail!("Unknown auth_mode: {other}. Use \"token\", \"oauth\", or \"none\""),
     }
+    Ok(())
+}
+
+pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
+    let addr: std::net::SocketAddr = format!("{}:{}", config.mcp.host, config.mcp.port).parse()?;
+    validate_transport_security(config, &addr)?;
 
     let api_client = create_api_client(config)?;
     let max_response_bytes = config.mcp.max_response_bytes;
@@ -301,5 +341,74 @@ mod tests {
         let cors_config = OAuthCorsConfig::default();
         let allowed = preflight_origin(&cors_config, "http://127.0.0.1").await;
         assert_eq!(allowed.as_deref(), Some("http://127.0.0.1"));
+    }
+
+    fn oauth_config(
+        origins: Vec<&str>,
+        base_url: Option<&str>,
+        allow_insecure: bool,
+    ) -> ServerConfig {
+        let mut config = ServerConfig::default();
+        config.mcp.auth_mode = "oauth".to_string();
+        config.mcp.oauth_cors = OAuthCorsConfig {
+            origins: origins.into_iter().map(str::to_string).collect(),
+        };
+        config.mcp.base_url = base_url.map(str::to_string);
+        config.mcp.oauth_allow_insecure_http = allow_insecure;
+        config
+    }
+
+    fn non_loopback() -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([203, 0, 113, 1], 8080))
+    }
+
+    #[test]
+    fn oauth_refuses_wildcard_cors_origin() {
+        let config = oauth_config(vec!["*"], Some("https://mcp.example.com"), false);
+        let err = validate_transport_security(&config, &non_loopback())
+            .expect_err("wildcard CORS under oauth must be refused");
+        assert!(err.to_string().contains("wildcard"), "got: {err}");
+    }
+
+    #[test]
+    fn oauth_refuses_plaintext_on_non_loopback() {
+        let config = oauth_config(
+            vec!["https://app.example.com"],
+            Some("http://mcp.example.com"),
+            false,
+        );
+        let err = validate_transport_security(&config, &non_loopback())
+            .expect_err("plaintext oauth off-loopback must be refused");
+        assert!(err.to_string().contains("plain HTTP"), "got: {err}");
+    }
+
+    #[test]
+    fn oauth_allows_plaintext_on_non_loopback_with_override() {
+        let config = oauth_config(
+            vec!["https://app.example.com"],
+            Some("http://mcp.example.com"),
+            true,
+        );
+        validate_transport_security(&config, &non_loopback())
+            .expect("override permits plaintext oauth off-loopback");
+    }
+
+    #[test]
+    fn none_mode_refuses_non_loopback() {
+        let mut config = ServerConfig::default();
+        config.mcp.auth_mode = "none".to_string();
+        let err = validate_transport_security(&config, &non_loopback())
+            .expect_err("auth_mode=none off-loopback must be refused");
+        assert!(err.to_string().contains("loopback"), "got: {err}");
+    }
+
+    #[test]
+    fn token_mode_requires_token() {
+        let mut config = ServerConfig::default();
+        config.mcp.auth_mode = "token".to_string();
+        config.mcp.token = None;
+        let err = validate_transport_security(&config, &non_loopback())
+            .expect_err("auth_mode=token without a token must be refused");
+        assert!(err.to_string().contains("token"), "got: {err}");
     }
 }

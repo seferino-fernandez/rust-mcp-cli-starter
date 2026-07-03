@@ -8,7 +8,7 @@
 
 use myapp_core::Config;
 use myapp_core::SecretString;
-use myapp_core::env::{Env, SystemEnv, env_non_empty, env_non_empty_u64};
+use myapp_core::env::{Env, SystemEnv, env_non_empty, env_non_empty_bool, env_non_empty_u64};
 use serde::Deserialize;
 use std::fmt::{Debug, Formatter};
 use std::fs;
@@ -27,6 +27,7 @@ const ENV_MCP_OAUTH_AUTH_CODE_TTL_SECS: &str = "MYAPP_MCP_OAUTH_AUTH_CODE_TTL_SE
 const ENV_MCP_OAUTH_CSRF_NONCE_TTL_SECS: &str = "MYAPP_MCP_OAUTH_CSRF_NONCE_TTL_SECS";
 const ENV_MCP_OAUTH_SWEEP_INTERVAL_SECS: &str = "MYAPP_MCP_OAUTH_SWEEP_INTERVAL_SECS";
 const ENV_MCP_OAUTH_CORS_ORIGINS: &str = "MYAPP_MCP_OAUTH_CORS_ORIGINS";
+const ENV_MCP_OAUTH_ALLOW_INSECURE_HTTP: &str = "MYAPP_MCP_OAUTH_ALLOW_INSECURE_HTTP";
 const ENV_MCP_MAX_RESPONSE_BYTES: &str = "MYAPP_MCP_MAX_RESPONSE_BYTES";
 
 const DEFAULT_MCP_HOST: &str = "127.0.0.1";
@@ -93,6 +94,10 @@ pub struct McpConfig {
     /// CORS configuration for OAuth routes.
     #[serde(default)]
     pub oauth_cors: OAuthCorsConfig,
+    /// Allow OAuth over plain HTTP on a non-loopback address. Off by default:
+    /// tokens and PKCE would otherwise traverse the network unencrypted. Set
+    /// only on a trusted private network that terminates TLS elsewhere.
+    pub oauth_allow_insecure_http: bool,
     /// Maximum serialized size (bytes) of a tool result. Results exceeding this
     /// are replaced with a bounded `response_too_large` error. Defaults to 1 MiB.
     pub max_response_bytes: usize,
@@ -114,6 +119,7 @@ impl Default for McpConfig {
             oauth_csrf_nonce_ttl_secs: DEFAULT_OAUTH_CSRF_NONCE_TTL_SECS,
             oauth_sweep_interval_secs: DEFAULT_OAUTH_SWEEP_INTERVAL_SECS,
             oauth_cors: OAuthCorsConfig::default(),
+            oauth_allow_insecure_http: false,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         }
     }
@@ -133,6 +139,7 @@ impl Debug for McpConfig {
             .field("oauth_csrf_nonce_ttl_secs", &self.oauth_csrf_nonce_ttl_secs)
             .field("oauth_sweep_interval_secs", &self.oauth_sweep_interval_secs)
             .field("oauth_cors", &self.oauth_cors)
+            .field("oauth_allow_insecure_http", &self.oauth_allow_insecure_http)
             .field("max_response_bytes", &self.max_response_bytes)
             .finish()
     }
@@ -231,6 +238,9 @@ fn apply_mcp_env(mcp: &mut McpConfig, env: &impl Env) -> anyhow::Result<()> {
             .map(|origin| origin.trim().to_string())
             .filter(|origin| !origin.is_empty())
             .collect();
+    }
+    if let Some(val) = env_non_empty_bool(env, ENV_MCP_OAUTH_ALLOW_INSECURE_HTTP) {
+        mcp.oauth_allow_insecure_http = val;
     }
     if let Some(val) = env_non_empty_u64(env, ENV_MCP_MAX_RESPONSE_BYTES) {
         // Saturate rather than truncate on 32-bit targets: an absurdly large cap
@@ -412,5 +422,15 @@ origins = ["*"]
         let config = ServerConfig::default();
         assert!(config.mcp.token.is_none());
         assert!(config.mcp.oauth_pin.is_none());
+    }
+
+    #[test]
+    fn oauth_allow_insecure_http_defaults_false_and_env_overrides() {
+        assert!(!ServerConfig::default().mcp.oauth_allow_insecure_http);
+
+        let env = MapEnv::default().with("MYAPP_MCP_OAUTH_ALLOW_INSECURE_HTTP", "true");
+        let config = ServerConfig::load_with_env(None, &env)
+            .expect("config loads with the insecure-http override set");
+        assert!(config.mcp.oauth_allow_insecure_http);
     }
 }
