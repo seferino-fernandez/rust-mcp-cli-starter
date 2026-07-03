@@ -9,9 +9,11 @@ use serde::Deserialize;
 pub struct ListItemsParams {
     /// 1-based page number.
     #[serde(default = "default_page")]
+    #[schemars(range(min = 1))]
     pub page: u32,
-    /// Page size.
+    /// Page size (1–1000).
     #[serde(default = "default_page_size")]
+    #[schemars(range(min = 1, max = 1000))]
     pub page_size: u32,
 }
 
@@ -37,4 +39,19 @@ pub struct CreateItemParams {
     /// Whether the item starts enabled.
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ListItemsParams;
+    use schemars::schema_for;
+
+    #[test]
+    fn list_items_params_bound_page_and_page_size() {
+        let schema = serde_json::to_value(schema_for!(ListItemsParams)).expect("schema serializes");
+        let props = &schema["properties"];
+        assert_eq!(props["page"]["minimum"], serde_json::json!(1));
+        assert_eq!(props["page_size"]["minimum"], serde_json::json!(1));
+        assert_eq!(props["page_size"]["maximum"], serde_json::json!(1000));
+    }
 }

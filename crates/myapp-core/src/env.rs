@@ -85,3 +85,43 @@ pub fn env_non_empty(env: &impl Env, key: &str) -> Option<String> {
 pub fn env_non_empty_u64(env: &impl Env, key: &str) -> Option<u64> {
     env_non_empty(env, key).and_then(|value| value.parse().ok())
 }
+
+/// Returns the value of `key` from `env` parsed as a boolean, if set.
+///
+/// Accepts `1`/`true`/`yes`/`on` (case-insensitive) as `true` and
+/// `0`/`false`/`no`/`off` as `false`. Unset, empty, or unrecognized values
+/// return `None`, leaving the caller's current value untouched.
+pub fn env_non_empty_bool(env: &impl Env, key: &str) -> Option<bool> {
+    match env_non_empty(env, key)?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bool_recognizes_false_spellings() {
+        let env = MapEnv::new().with("FLAG", "off");
+        assert_eq!(env_non_empty_bool(&env, "FLAG"), Some(false));
+    }
+
+    #[test]
+    fn bool_rejects_unrecognized_value() {
+        let env = MapEnv::new().with("FLAG", "maybe");
+        assert_eq!(env_non_empty_bool(&env, "FLAG"), None);
+    }
+
+    #[test]
+    fn bool_unset_key_is_none() {
+        let env = MapEnv::new();
+        assert_eq!(env_non_empty_bool(&env, "FLAG"), None);
+    }
+}
