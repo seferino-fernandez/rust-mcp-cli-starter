@@ -86,11 +86,11 @@ fn redact_secrets_inner(value: &mut Value) {
         }
         Value::Object(map) => {
             for (key, val) in map.iter_mut() {
-                if is_sensitive_key(key) {
-                    if let Value::String(s) = val {
-                        *s = REDACTED.to_string();
-                        continue;
-                    }
+                if is_sensitive_key(key)
+                    && let Value::String(s) = val
+                {
+                    *s = REDACTED.to_string();
+                    continue;
                 }
                 redact_secrets_inner(val);
             }

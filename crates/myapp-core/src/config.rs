@@ -165,7 +165,7 @@ impl Config {
     }
 
     /// Determines the config file path: explicit arg → `MYAPP_CONFIG` env →
-    /// `~/.config/myapp/config.toml`.
+    /// Platform config directory → `~/.config/myapp/config.toml`.
     ///
     /// Exposed so dependent crates (e.g. the MCP server) resolve the same path
     /// without duplicating the precedence logic.
@@ -176,7 +176,11 @@ impl Config {
         if let Some(p) = env_non_empty(env, "MYAPP_CONFIG") {
             return Some(std::path::PathBuf::from(p));
         }
-        dirs::config_dir().map(|d| d.join("myapp").join("config.toml"))
+        let platform_path = dirs::config_dir().map(|dir| dir.join("myapp").join("config.toml"));
+        if platform_path.clone().is_some_and(|p| p.exists()) {
+            return platform_path;
+        }
+        dirs::home_dir().map(|dir| dir.join(".config").join("myapp").join("config.toml"))
     }
 }
 
