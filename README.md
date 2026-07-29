@@ -37,9 +37,21 @@ to rename the project; without it, cargo-generate prompts for confirmation
 
 ## Quick start (after generating)
 
-```bash
+Build the project:
+
+```shell
 cargo build
+```
+
+Run the project's tests:
+
+```shell
 cargo test
+```
+
+Run a command from the CLI module:
+
+```shell
 MYAPP_BASE_URL=http://localhost:8080 MYAPP_API_KEY=xxxx cargo run -p myapp-cli -- status
 ```
 
@@ -64,26 +76,38 @@ overrides these flags entirely (e.g. `RUST_LOG=myapp_core=trace,reqwest=debug`).
 The `myapp` CLI supports static completions for bash, elvish, fish, nushell,
 powershell, and zsh, plus dynamic completions for every shell except nushell.
 
-**Static** — generate a script once and install it where your shell looks for it:
+**Static** - generate a script once and install it where your shell looks for it:
 
-```bash
+```shell
 myapp completions zsh     > ~/.zsh/completions/_myapp
-myapp completions bash    | sudo tee /usr/share/bash-completion/completions/myapp
-myapp completions fish    > ~/.config/fish/completions/myapp.fish
-myapp completions nushell > ~/.config/nushell/completions/myapp.nu  # then `source` it
 ```
 
-**Dynamic** — let the binary drive completions at runtime via the `COMPLETE`
+```shell
+myapp completions bash    | sudo tee /usr/share/bash-completion/completions/myapp
+```
+
+```shell
+myapp completions fish    > ~/.config/fish/completions/myapp.fish
+```
+
+```shell
+myapp completions nushell > ~/.config/nushell/completions/myapp.nu
+```
+
+**Dynamic** - let the binary drive completions at runtime via the `COMPLETE`
 environment variable. Add one line to your shell startup file:
 
-```bash
-echo 'source <(COMPLETE=zsh myapp)'  >> ~/.zshrc    # zsh
-echo 'source <(COMPLETE=bash myapp)' >> ~/.bashrc   # bash
-echo 'COMPLETE=fish myapp | source'  >> ~/.config/fish/completions/myapp.fish  # fish
+```shell
+echo 'source <(COMPLETE=zsh myapp)'  >> ~/.zshrc
 ```
 
-Dynamic completions re-generate on shell startup, so they stay correct as the CLI
-changes — re-source (a new shell session) after upgrading `myapp`.
+```shell
+echo 'source <(COMPLETE=bash myapp)' >> ~/.bashrc
+```
+
+```shell
+echo 'COMPLETE=fish myapp | source'  >> ~/.config/fish/completions/myapp.fish
+```
 
 ## Man pages
 
@@ -91,23 +115,23 @@ The `myapp` CLI generates ROFF man pages for itself and every subcommand into a
 directory (created if missing):
 
 ```bash
-# Generate into ./man, then preview one
-myapp man ./man
-man -l ./man/myapp.1
-
-# Install system-wide (Linux example)
 myapp man ~/.local/share/man/man1
 ```
 
 ## MCP server
 
-`myapp-mcp` exposes the same API to LLM clients over two transports:
+`myapp-mcp` implements MCP **2026-07-28** (`rmcp 3.x`) and exposes the same API to
+LLM clients over two transports:
 
 - `stdio`: for local clients such as Claude Desktop.
 - `http` (streamable HTTP): for networked clients, with a choice of auth mode:
-  - `token`: static bearer token (constant-time compared).
-  - `oauth`: OAuth 2.1 authorization-code flow with PKCE.
-  - `none`: no auth (loopback only).
+    - `token`: static bearer token (constant-time compared).
+    - `oauth`: OAuth 2.1 authorization-code flow with PKCE.
+    - `none`: no auth (loopback only).
+
+Older clients still negotiate down: the server accepts every protocol version
+rmcp knows, so a 2025-11-25 client keeps its session and resumability while a
+2026-07-28 client is served statelessly.
 
 Tool input schemas are closed (`additionalProperties: false`) and tool results
 are capped to a configurable byte budget. See the

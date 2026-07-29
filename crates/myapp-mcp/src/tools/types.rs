@@ -25,7 +25,7 @@ pub(crate) fn format_tool_error(error: &Error) -> String {
                 .to_string()
         }
         Error::Api { status: 404, .. } => {
-            "not found (404): verify the id — use the corresponding list tool to find valid ids"
+            "not found (404): verify the id - use the corresponding list tool to find valid ids"
                 .to_string()
         }
         other => other.to_string(),

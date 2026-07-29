@@ -4,7 +4,7 @@ Terminal CLI for the MYAPP API, built on [myapp-core](../myapp-core/).
 
 ## Build
 
-```bash
+```shell
 cargo build --release -p myapp-cli
 ```
 
@@ -20,14 +20,21 @@ The binary is written to `target/release/myapp`. Add it to your `PATH` or invoke
 | `item create` | Create an item (`<name>`, `--enabled`).         |
 | `item delete` | Delete an item by id.                           |
 
-```bash
-# Server health
+Server health:
+
+```shell
 myapp status
+```
 
-# List the first page of items
+List the first page of items:
+
+```shell
 myapp item list --page 1 --page-size 20
+```
 
-# Fetch / create / delete
+Fetch / create / delete:
+
+```shell
 myapp item get 42
 myapp item create "my item" --enabled
 myapp item delete 42
@@ -39,7 +46,7 @@ myapp item delete 42
 Logs go to stderr, so stdout carries only structured data when `--output json` or
 `--output csv` is active, which makes it safe to pipe.
 
-```bash
+```shell
 myapp --output json item list | jq '.[] | {id, name}'
 myapp --output csv item list > items.csv
 ```

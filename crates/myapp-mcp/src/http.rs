@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::ServerConfig;
+use crate::config::{McpConfig, ServerConfig};
 use crate::middleware::cors::oauth_cors_layer;
 use crate::middleware::oauth::{OAuthMiddlewareState, oauth_bearer_auth};
 use crate::middleware::static_bearer_auth::{StaticAuthToken, static_bearer_auth};
@@ -92,12 +92,16 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     let service: StreamableHttpService<AppTools, LocalSessionManager> = StreamableHttpService::new(
         move || Ok(AppTools::new(api_client.clone(), max_response_bytes)),
         session_manager,
-        {
-            let mut config = StreamableHttpServerConfig::default();
-            config.stateful_mode = true;
-            config.cancellation_token = cancellation_token.child_token();
-            config
-        },
+        StreamableHttpServerConfig::default()
+            // Sessions apply only to protocol versions older than 2026-07-28.
+            // Per SEP-2567 the 2026-07-28 protocol removed them, so modern
+            // clients are served statelessly regardless of this setting; keeping
+            // it on preserves sessions and resumability for older clients.
+            .with_legacy_session_mode(true)
+            .with_cancellation_token(cancellation_token.child_token())
+            // Guards against DNS rebinding. Defaults to loopback only, so a
+            // non-loopback deployment must list its own hostnames here.
+            .with_allowed_hosts(config.mcp.allowed_hosts.clone()),
     );
 
     tracing::debug!(auth_mode = %config.mcp.auth_mode, "Building router");
@@ -206,6 +210,20 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
              Ensure network access is intentional and properly secured.",
             addr
         );
+        // Warn rather than fail: binding 0.0.0.0 inside a container while being
+        // addressed as localhost is legitimate. But if the Host header carries a
+        // public hostname, rmcp's DNS-rebinding guard rejects the request with
+        // 403 before it reaches a handler, which is hard to diagnose blind.
+        if config.mcp.allowed_hosts == McpConfig::default().allowed_hosts {
+            tracing::warn!(
+                "[mcp] allowed_hosts is still the loopback default {:?} while \
+                 binding to {}. Requests whose Host header is not in that list \
+                 will be rejected with 403. Set [mcp] allowed_hosts (or \
+                 MYAPP_MCP_ALLOWED_HOSTS) to your public hostname(s).",
+                config.mcp.allowed_hosts,
+                addr
+            );
+        }
     }
 
     tracing::info!(
@@ -410,5 +428,242 @@ mod tests {
         let err = validate_transport_security(&config, &non_loopback())
             .expect_err("auth_mode=token without a token must be refused");
         assert!(err.to_string().contains("token"), "got: {err}");
+    }
+}
+
+/// End-to-end wire tests for the MCP streamable HTTP transport.
+///
+/// These drive [`StreamableHttpService`] directly rather than the full router,
+/// so they cover exactly the rmcp surface this crate configures without pulling
+/// in auth middleware. They exist because none of the protocol behavior they
+/// assert is checked by the compiler: the advertised version, the session
+/// boundary at 2026-07-28, the `resultType` discriminator, and the SEP-2549
+/// cache hints all compile identically whether or not they are correct.
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use axum::body::Body;
+    use rmcp::model::ProtocolVersion;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    const V_MODERN: &str = "2026-07-28";
+    const V_LEGACY: &str = "2025-11-25";
+
+    fn mcp_service() -> StreamableHttpService<AppTools, LocalSessionManager> {
+        // `ApiClient::new` performs no I/O, and neither `initialize` nor
+        // `tools/list` ever calls the upstream API, so these tests need no
+        // network and no mock server.
+        let core_config = myapp_core::Config {
+            api_key: Some(myapp_core::SecretString::from("test-key")),
+            ..myapp_core::Config::default()
+        };
+        let client = myapp_core::ApiClient::new(core_config).expect("client builds");
+        StreamableHttpService::new(
+            move || Ok(AppTools::new(client.clone(), 1024 * 1024)),
+            Arc::default(),
+            StreamableHttpServerConfig::default()
+                .with_legacy_session_mode(true)
+                .with_allowed_hosts(McpConfig::default().allowed_hosts),
+        )
+    }
+
+    /// Sends one JSON-RPC message and returns the status, headers, and every
+    /// JSON payload in the response (SSE `data:` frames, or a lone JSON body).
+    async fn post(
+        service: &StreamableHttpService<AppTools, LocalSessionManager>,
+        body: Value,
+        session_id: Option<&str>,
+        protocol_version: Option<&str>,
+    ) -> (axum::http::StatusCode, axum::http::HeaderMap, Vec<Value>) {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/")
+            // Loopback, to satisfy rmcp's DNS-rebinding guard.
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream");
+        if let Some(id) = session_id {
+            request = request.header("mcp-session-id", id);
+        }
+        // rmcp cross-validates this header against `_meta.protocolVersion`, so a
+        // request declaring one must send the other. Omitted on `initialize`,
+        // where the client does not yet know the negotiated version.
+        if let Some(version) = protocol_version {
+            request = request.header("mcp-protocol-version", version);
+
+            // SEP-2243 routing headers, required from 2026-07-28 onward and
+            // validated by the server against the body. Derived here the same
+            // way a real client derives them, so these tests exercise the
+            // validation path rather than side-stepping it.
+            if version >= V_MODERN {
+                if let Some(method) = body.get("method").and_then(Value::as_str) {
+                    request = request.header("mcp-method", method);
+                }
+                let name = body
+                    .get("params")
+                    .and_then(|params| params.get("name").or_else(|| params.get("uri")))
+                    .and_then(Value::as_str);
+                if let Some(name) = name {
+                    request = request.header("mcp-name", name);
+                }
+            }
+        }
+        let request = request
+            .body(Body::from(body.to_string()))
+            .expect("request builds");
+
+        let response = service.clone().oneshot(request).await.expect("infallible");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(Body::new(response.into_body()), usize::MAX)
+            .await
+            .expect("body collects");
+        let text = String::from_utf8_lossy(&bytes).to_string();
+
+        // Responses are `text/event-stream` unless the body is bare JSON.
+        let payloads = if text.contains("data:") {
+            text.lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .filter_map(|data| serde_json::from_str(data.trim()).ok())
+                .collect()
+        } else {
+            serde_json::from_str::<Value>(&text).into_iter().collect()
+        };
+        (status, headers, payloads)
+    }
+
+    fn initialize(version: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": version,
+                "capabilities": {},
+                "clientInfo": { "name": "wire-test", "version": "0" }
+            }
+        })
+    }
+
+    /// A 2026-07-28 `tools/list`. Stateless requests carry their own lifecycle
+    /// metadata in `_meta` instead of relying on a session (SEP-2575).
+    fn modern_tools_list() -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": V_MODERN,
+                    "io.modelcontextprotocol/clientInfo": { "name": "wire-test", "version": "0" },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        })
+    }
+
+    fn legacy_tools_list() -> Value {
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })
+    }
+
+    fn result_of(payloads: &[Value]) -> Value {
+        payloads
+            .iter()
+            .find(|payload| payload.get("result").is_some())
+            .unwrap_or_else(|| panic!("no result in payloads: {payloads:?}"))["result"]
+            .clone()
+    }
+
+    /// Per SEP-2567 the 2026-07-28 protocol removed sessions, so a modern client
+    /// is served statelessly even though `legacy_session_mode` is on.
+    #[tokio::test]
+    async fn modern_client_negotiates_2026_07_28_without_a_session() {
+        let service = mcp_service();
+        let (status, headers, payloads) = post(&service, initialize(V_MODERN), None, None).await;
+
+        assert!(
+            status.is_success(),
+            "initialize failed: {status} {payloads:?}"
+        );
+        assert_eq!(result_of(&payloads)["protocolVersion"], V_MODERN);
+        assert!(
+            headers.get("mcp-session-id").is_none(),
+            "2026-07-28 requests must be stateless, got {headers:?}"
+        );
+    }
+
+    /// The other half of dual mode: `legacy_session_mode` still gives pre-2026
+    /// clients a session, so they keep resumability.
+    #[tokio::test]
+    async fn legacy_client_still_gets_a_session() {
+        let service = mcp_service();
+        let (status, headers, payloads) = post(&service, initialize(V_LEGACY), None, None).await;
+
+        assert!(
+            status.is_success(),
+            "initialize failed: {status} {payloads:?}"
+        );
+        assert_eq!(result_of(&payloads)["protocolVersion"], V_LEGACY);
+        assert!(
+            headers.get("mcp-session-id").is_some(),
+            "legacy sessions must still be issued, got {headers:?}"
+        );
+    }
+
+    /// A modern peer gets the SEP-2322 `resultType` discriminator and the
+    /// SEP-2549 cache hints set in `ServerHandler::list_tools`.
+    #[tokio::test]
+    async fn modern_tools_list_carries_result_type_and_cache_hints() {
+        let service = mcp_service();
+        let (_, _, _) = post(&service, initialize(V_MODERN), None, None).await;
+        let (status, _, payloads) = post(&service, modern_tools_list(), None, Some(V_MODERN)).await;
+
+        assert!(
+            status.is_success(),
+            "tools/list failed: {status} {payloads:?}"
+        );
+        let result = result_of(&payloads);
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["ttlMs"], 300_000);
+        assert_eq!(result["cacheScope"], "private");
+        assert_eq!(
+            result["tools"].as_array().map(Vec::len),
+            Some(5),
+            "all five tools must be advertised"
+        );
+    }
+
+    /// The legacy wire shape is unchanged: rmcp clears `resultType` before
+    /// replying to a peer that negotiated an older version.
+    #[tokio::test]
+    async fn legacy_tools_list_omits_result_type() {
+        let service = mcp_service();
+        let (_, headers, _) = post(&service, initialize(V_LEGACY), None, None).await;
+        let session = headers
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("legacy initialize issues a session")
+            .to_string();
+
+        let (status, _, payloads) = post(&service, legacy_tools_list(), Some(&session), None).await;
+        assert!(
+            status.is_success(),
+            "tools/list failed: {status} {payloads:?}"
+        );
+        let result = result_of(&payloads);
+        assert!(
+            result.get("resultType").is_none(),
+            "legacy peers must not receive resultType: {result}"
+        );
+        assert_eq!(result["tools"].as_array().map(Vec::len), Some(5));
+    }
+
+    /// `ProtocolVersion::LATEST` still resolves to 2025-11-25 in rmcp 3.0, which
+    /// is why `get_info` names 2026-07-28 explicitly. If this ever fails, the SDK
+    /// moved its default and the hardcoded constant should be revisited.
+    #[test]
+    fn sdk_latest_still_lags_the_version_we_advertise() {
+        assert_eq!(ProtocolVersion::LATEST, ProtocolVersion::V_2025_11_25);
     }
 }

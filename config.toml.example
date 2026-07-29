@@ -45,3 +45,11 @@ connect_timeout_secs = 10
 # Cap on serialized tool-result size (bytes); oversized results are replaced
 # with a bounded `response_too_large` error. Env: MYAPP_MCP_MAX_RESPONSE_BYTES
 # max_response_bytes = 1048576  # default: 1 MiB
+
+# Hostnames accepted in the inbound `Host` header (DNS-rebinding guard).
+# Defaults to loopback, so binding to a non-loopback address REQUIRES setting
+# this: requests carrying your public hostname are otherwise rejected with 403
+# before reaching a handler. Env: MYAPP_MCP_ALLOWED_HOSTS (comma-separated).
+# Entries may include a port, e.g. "example.com:8443".
+# An empty list disables the check and accepts any Host
+# allowed_hosts = ["localhost", "127.0.0.1", "::1"]

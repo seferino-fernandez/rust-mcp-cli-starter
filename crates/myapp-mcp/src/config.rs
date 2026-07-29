@@ -29,6 +29,7 @@ const ENV_MCP_OAUTH_SWEEP_INTERVAL_SECS: &str = "MYAPP_MCP_OAUTH_SWEEP_INTERVAL_
 const ENV_MCP_OAUTH_CORS_ORIGINS: &str = "MYAPP_MCP_OAUTH_CORS_ORIGINS";
 const ENV_MCP_OAUTH_ALLOW_INSECURE_HTTP: &str = "MYAPP_MCP_OAUTH_ALLOW_INSECURE_HTTP";
 const ENV_MCP_MAX_RESPONSE_BYTES: &str = "MYAPP_MCP_MAX_RESPONSE_BYTES";
+const ENV_MCP_ALLOWED_HOSTS: &str = "MYAPP_MCP_ALLOWED_HOSTS";
 
 const DEFAULT_MCP_HOST: &str = "127.0.0.1";
 const DEFAULT_MCP_PORT: u16 = 8080;
@@ -37,9 +38,23 @@ const DEFAULT_OAUTH_TOKEN_EXPIRY_SECS: u64 = 3600;
 const DEFAULT_OAUTH_AUTH_CODE_TTL_SECS: u64 = 60;
 const DEFAULT_OAUTH_CSRF_NONCE_TTL_SECS: u64 = 600;
 const DEFAULT_OAUTH_SWEEP_INTERVAL_SECS: u64 = 300;
+
 /// Default cap on serialized tool-result size: 1 MiB. Generous enough not to
 /// clip normal API responses, while guarding against pathological payloads.
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// Default `Host` allow-list for the streamable HTTP transport: loopback only.
+///
+/// Mirrors rmcp's own default. Not empty because rmcp treats an empty
+/// list as "accept any `Host`", which switches the DNS-rebinding guard off.
+const DEFAULT_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+
+fn default_allowed_hosts() -> Vec<String> {
+    DEFAULT_ALLOWED_HOSTS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
 
 /// CORS configuration for the MCP OAuth routes.
 #[derive(Debug, Clone, Deserialize)]
@@ -101,6 +116,17 @@ pub struct McpConfig {
     /// Maximum serialized size (bytes) of a tool result. Results exceeding this
     /// are replaced with a bounded `response_too_large` error. Defaults to 1 MiB.
     pub max_response_bytes: usize,
+    /// Hostnames (or `host:port` authorities) accepted in the inbound `Host`
+    /// header, guarding against DNS rebinding attacks on the MCP endpoint.
+    ///
+    /// Defaults to loopback only, so **binding to a non-loopback address
+    /// requires setting this**, otherwise every request carrying your public
+    /// hostname is rejected with 403 before it reaches a handler.
+    ///
+    /// An **empty list disables the check entirely** and accepts any `Host`.
+    /// That is a deliberate escape hatch, not a safe default: prefer listing
+    /// your real hostnames.
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for McpConfig {
@@ -121,6 +147,7 @@ impl Default for McpConfig {
             oauth_cors: OAuthCorsConfig::default(),
             oauth_allow_insecure_http: false,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            allowed_hosts: default_allowed_hosts(),
         }
     }
 }
@@ -141,6 +168,7 @@ impl Debug for McpConfig {
             .field("oauth_cors", &self.oauth_cors)
             .field("oauth_allow_insecure_http", &self.oauth_allow_insecure_http)
             .field("max_response_bytes", &self.max_response_bytes)
+            .field("allowed_hosts", &self.allowed_hosts)
             .finish()
     }
 }
@@ -246,6 +274,20 @@ fn apply_mcp_env(mcp: &mut McpConfig, env: &impl Env) -> anyhow::Result<()> {
         // Saturate rather than truncate on 32-bit targets: an absurdly large cap
         // simply becomes "effectively unbounded".
         mcp.max_response_bytes = usize::try_from(val).unwrap_or(usize::MAX);
+    }
+    if let Some(hosts_csv) = env_non_empty(env, ENV_MCP_ALLOWED_HOSTS) {
+        let hosts: Vec<String> = hosts_csv
+            .split(',')
+            .map(|host| host.trim().to_string())
+            .filter(|host| !host.is_empty())
+            .collect();
+        // Apply only a non-empty result. An all-whitespace or all-comma value
+        // parses to nothing, and rmcp reads an empty allow-list as "accept any
+        // Host", so assigning it here would silently switch the DNS-rebinding
+        // guard off.
+        if !hosts.is_empty() {
+            mcp.allowed_hosts = hosts;
+        }
     }
     Ok(())
 }
@@ -415,6 +457,37 @@ origins = ["*"]
         let env = MapEnv::new().with("MYAPP_MCP_MAX_RESPONSE_BYTES", "4096");
         let config = ServerConfig::load_with_env(None, &env).unwrap();
         assert_eq!(config.mcp.max_response_bytes, 4096);
+    }
+
+    /// The default must stay loopback-only and, above all, non-empty: rmcp reads
+    /// an empty allow-list as "accept any `Host`", which turns the DNS-rebinding
+    /// guard off for every deployment that never sets this.
+    #[test]
+    fn allowed_hosts_defaults_to_loopback_and_is_never_empty() {
+        let config = ServerConfig::default();
+        assert_eq!(config.mcp.allowed_hosts, ["localhost", "127.0.0.1", "::1"]);
+    }
+
+    #[test]
+    fn allowed_hosts_env_override_applies() {
+        let env = MapEnv::new().with(
+            "MYAPP_MCP_ALLOWED_HOSTS",
+            "mcp.example.com, example.com:8443",
+        );
+        let config = ServerConfig::load_with_env(None, &env).unwrap();
+        assert_eq!(
+            config.mcp.allowed_hosts,
+            ["mcp.example.com", "example.com:8443"]
+        );
+    }
+
+    /// An empty or whitespace-only env value must not clear the list, since that
+    /// would silently disable the guard. Turning it off stays TOML-only.
+    #[test]
+    fn empty_allowed_hosts_env_does_not_clear_the_default() {
+        let env = MapEnv::new().with("MYAPP_MCP_ALLOWED_HOSTS", "  ");
+        let config = ServerConfig::load_with_env(None, &env).unwrap();
+        assert_eq!(config.mcp.allowed_hosts, ["localhost", "127.0.0.1", "::1"]);
     }
 
     #[test]

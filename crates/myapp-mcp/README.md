@@ -2,12 +2,45 @@
 
 MCP server exposing the MYAPP API as tools for LLM clients.
 
-Built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk) and [myapp-core](../myapp-core/).
+Built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk) 3.x and [myapp-core](../myapp-core/).
+
+Implements the MCP [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28)
+specification, and negotiates down to every earlier version `rmcp` supports.
 
 ## Transports
 
 - `stdio` for Claude Desktop, Claude Code, and other local MCP clients
-- `http` (streamable HTTP with session management) for remote deployments
+- `http` (streamable HTTP) for remote deployments
+
+### Sessions and the 2026-07-28 boundary
+
+SEP-2567 removed sessions from the 2026-07-28 protocol, so the transport runs in
+dual mode:
+
+| Negotiated version     | Behavior                                                                                                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `2026-07-28`           | Stateless. No `Mcp-Session-Id`, no GET/DELETE, no resumption. Results carry `resultType`, and `tools/list` carries SEP-2549 `ttlMs` / `cacheScope` hints. |
+| `2025-11-25` and older | Session-based, with SSE priming and resumability. Legacy wire shape preserved - no `resultType`.                                                          |
+
+Controlled by `legacy_session_mode` in `http.rs`; it only affects pre-2026-07-28
+clients, since modern requests are always stateless.
+
+### Host validation
+
+The streamable HTTP transport rejects requests whose `Host` header is not in
+`[mcp] allowed_hosts` (a DNS-rebinding guard), which defaults to loopback only.
+**Deploying to a non-loopback address requires setting it**, via TOML or
+`MYAPP_MCP_ALLOWED_HOSTS` (comma-separated). An empty list disables the check
+entirely.
+
+### SEP-2243 routing headers
+
+Clients negotiating 2026-07-28 send `Mcp-Method` and `Mcp-Name` alongside the
+JSON-RPC body so gateways can route without parsing it. A tool can promote a
+top-level primitive argument to an `Mcp-Param-*` header with the `x-mcp-header`
+schema annotation; `ItemIdParams::id` does this as a worked example, surfacing
+as `Mcp-Param-Item-Id`. The server validates these headers against the body and
+rejects mismatches.
 
 ## Authentication modes
 
@@ -19,14 +52,21 @@ Built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk) and [myapp-cor
 
 ## Quick start
 
+stdio transport:
+
 ```bash
-# stdio transport
 myapp-mcp --transport stdio
+```
 
-# HTTP with static token
+HTTP with static token
+
+```shell
 myapp-mcp --transport http --auth-mode token --token my-secret
+```
 
-# HTTP with OAuth
+HTTP with OAuth:
+
+```shell
 myapp-mcp --transport http --auth-mode oauth --port 8080
 ```
 
@@ -55,12 +95,19 @@ config / `MYAPP_LOG_LEVEL` still apply when no flag is given.
 `myapp-mcp` supports static completions for bash, elvish, fish, nushell,
 powershell, and zsh, plus dynamic completions for every shell except nushell.
 
-```bash
-# Static: generate a script and install it where your shell looks for it
-myapp-mcp completions zsh     > ~/.zsh/completions/_myapp-mcp
-myapp-mcp completions nushell > ~/.config/nushell/completions/myapp-mcp.nu
+Static: generate a script and install it where your shell looks for it
 
-# Dynamic: let the binary drive completions at runtime (re-source after upgrades)
+```shell
+myapp-mcp completions zsh > ~/.zsh/completions/_myapp-mcp
+```
+
+```shell
+myapp-mcp completions nushell > ~/.config/nushell/completions/myapp-mcp.nu
+```
+
+Dynamic: let the binary drive completions at runtime (re-source after upgrades)
+
+```shell
 echo 'source <(COMPLETE=zsh myapp-mcp)' >> ~/.zshrc
 ```
 
@@ -71,7 +118,7 @@ Running `myapp-mcp` with no subcommand still starts the server as usual.
 Generate ROFF man pages for the server and every subcommand into a directory
 (created if missing):
 
-```bash
+```shell
 myapp-mcp man ./man
 man -l ./man/myapp-mcp.1
 ```

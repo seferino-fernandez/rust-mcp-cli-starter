@@ -61,7 +61,7 @@ pub fn enforce_response_budget(result: CallToolResult, max_bytes: usize) -> Call
     if size <= max_bytes {
         return result;
     }
-    // Preserve the original error flag: in rmcp 1.7 a tool `Err(String)` arrives
+    // Preserve the original error flag: a tool returning `Err(String)` arrives
     // here as `Ok(CallToolResult { is_error: Some(true), .. })`, so relabeling it
     // as a success would silently hide the failure.
     let was_error = result.is_error;
@@ -287,6 +287,77 @@ mod router_tests {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Pins the advertised protocol version. `ProtocolVersion::LATEST` still
+    /// resolves to 2025-11-25 in rmcp 3.0 and will move in a later release, so
+    /// this server names its version explicitly.
+    #[test]
+    fn advertises_current_protocol_version() {
+        use rmcp::ServerHandler;
+        use rmcp::model::ProtocolVersion;
+
+        let config = Config {
+            api_key: Some(myapp_core::SecretString::from("test-key")),
+            ..Config::default()
+        };
+        let client = ApiClient::new(config).expect("config with api key builds a client");
+        let tools = AppTools::new(client, 1024 * 1024);
+        assert_eq!(
+            tools.get_info().protocol_version,
+            ProtocolVersion::V_2026_07_28
+        );
+    }
+
+    /// The server must identify itself, not the SDK. `Implementation::default()`
+    /// and `from_build_env()` both expand `env!` inside rmcp, so they report
+    /// `"rmcp"` at rmcp's version which would tell clients this server is
+    /// version 3.0.0. Guards against a well-meaning revert to either.
+    #[test]
+    fn identifies_itself_rather_than_the_sdk() {
+        use rmcp::ServerHandler;
+
+        let config = Config {
+            api_key: Some(myapp_core::SecretString::from("test-key")),
+            ..Config::default()
+        };
+        let client = ApiClient::new(config).expect("config with api key builds a client");
+        let tools = AppTools::new(client, 1024 * 1024);
+        let server_info = tools.get_info().server_info;
+
+        assert_eq!(server_info.name, env!("CARGO_PKG_NAME"));
+        assert_eq!(server_info.version, env!("CARGO_PKG_VERSION"));
+        assert_ne!(
+            server_info.name, "rmcp",
+            "server_info must not report the SDK's identity"
+        );
+    }
+
+    /// The SEP-2243 `x-mcp-header` annotation must survive schema closing. The
+    /// server looks the schema up through `get_tool` to validate inbound
+    /// `Mcp-Param-*` headers against the request body, so if `close_tool_schemas`
+    /// ever dropped the annotation, promotion would silently stop working.
+    #[test]
+    fn item_id_advertises_its_mcp_param_header() {
+        use rmcp::ServerHandler;
+
+        let config = Config {
+            api_key: Some(myapp_core::SecretString::from("test-key")),
+            ..Config::default()
+        };
+        let client = ApiClient::new(config).expect("config with api key builds a client");
+        let tools = AppTools::new(client, 1024 * 1024);
+
+        for name in ["get_item", "delete_item"] {
+            let tool = tools
+                .get_tool(name)
+                .unwrap_or_else(|| panic!("{name} must be registered"));
+            assert_eq!(
+                tool.input_schema["properties"]["id"]["x-mcp-header"],
+                Value::String("Item-Id".to_string()),
+                "{name} must promote `id` to the Mcp-Param-Item-Id header",
+            );
         }
     }
 }

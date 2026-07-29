@@ -4,7 +4,7 @@
 //! secrets, so nothing here is wired into the return path. If your API returns
 //! secret fields (`apiKey`, `password`, `token`, …) or URLs with embedded
 //! credentials (e.g. `https://host/dl?apikey=…`), call [`redact_secrets`] on the
-//! serialized `serde_json::Value` before handing it back — the MCP layer is the
+//! serialized `serde_json::Value` before handing it back. The MCP layer is the
 //! trust boundary to the LLM, so secrets must never reach the model context.
 
 use serde_json::Value;
@@ -47,8 +47,8 @@ pub fn redact_secrets(value: &mut Value) {
 
 /// Projects a JSON object down to the whitelisted `keys` (missing keys are
 /// skipped); non-objects are returned unchanged. Use this to return compact
-/// summary records for large collections instead of the full upstream payload —
-/// gate the full object behind a `verbose` tool parameter.
+/// summary records for large collections instead of the full upstream payload.
+/// Gate the full object behind a `verbose` tool parameter.
 ///
 /// Exported as a ready-to-use helper for generated projects; unused by the
 /// example tools, hence the `#[expect(dead_code)]` (template helper intended

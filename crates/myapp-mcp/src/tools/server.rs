@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Implementation, PaginatedRequestParams, ProtocolVersion,
-    ServerCapabilities, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, Implementation, PaginatedRequestParams,
+    ProtocolVersion, ServerCapabilities, Tool,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -28,9 +28,12 @@ fn close_tool_schemas(tool: &mut Tool) {
 impl ServerHandler for AppTools {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
-        info.protocol_version = ProtocolVersion::LATEST;
+        // `ProtocolVersion::LATEST` still resolves to 2025-11-25
+        // in rmcp 3.0 and will move in a later release.
+        info.protocol_version = ProtocolVersion::V_2026_07_28;
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        info.server_info = Implementation::from_build_env();
+        info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+            .with_description(env!("CARGO_PKG_DESCRIPTION"));
         info.instructions = Some(include_str!("instructions.md").to_string());
         info
     }
@@ -44,25 +47,25 @@ impl ServerHandler for AppTools {
         for tool in &mut tools {
             close_tool_schemas(tool);
         }
-        Ok(ListToolsResult {
-            tools,
-            meta: None,
-            next_cursor: None,
-        })
+
+        Ok(ListToolsResult::with_all_items(tools)
+            .with_ttl_ms(300_000)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         tracing::info!(tool = %request.name, "call_tool");
         let tool_call_context = ToolCallContext::new(self, request, context);
-        let call_result = self.tool_router.call(tool_call_context).await?;
-        Ok(enforce_response_budget(
-            call_result,
-            self.max_response_bytes,
-        ))
+        Ok(match self.tool_router.call(tool_call_context).await? {
+            CallToolResponse::Complete(result) => {
+                enforce_response_budget(result, self.max_response_bytes).into()
+            }
+            other => other,
+        })
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {

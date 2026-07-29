@@ -28,6 +28,15 @@ fn default_page_size() -> u32 {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ItemIdParams {
     /// Item id.
+    ///
+    /// The `x-mcp-header` annotation (SEP-2243) asks clients negotiating
+    /// 2026-07-28 to also send this value as the `Mcp-Param-Item-Id` HTTP
+    /// header, so gateways and proxies can route, rate-limit, or audit by
+    /// entity without parsing the JSON-RPC body. The server validates the
+    /// header against the body and rejects mismatches.
+    ///
+    /// Promotion is limited to top-level, primitive-typed properties.
+    #[schemars(extend("x-mcp-header" = "Item-Id"))]
     pub id: i64,
 }
 
