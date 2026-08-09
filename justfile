@@ -1,6 +1,13 @@
 default:
     @just --list
 
+# Full gate: formatting, lints, locked check, and the whole test matrix (mirrors CI)
+verify:
+	cargo fmt --all --check
+	cargo clippy --all-targets --all-features -- -D warnings
+	cargo check --locked
+	just test
+
 # Run all tests: full feature matrix, default features, and doctests
 test:
 	cargo nextest run --all-targets --all-features
