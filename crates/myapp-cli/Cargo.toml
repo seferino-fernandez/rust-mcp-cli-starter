@@ -25,11 +25,11 @@ clap_complete = { workspace = true }
 clap_complete_nushell = { workspace = true }
 clap_mangen = { workspace = true }
 clap-verbosity-flag = { workspace = true }
-comfy-table = "8.0.0"
+comfy-table.workspace = true
 
 [dev-dependencies]
-assert_cmd = "2.2.2"
-predicates = "3.1.4"
+assert_cmd.workspace = true
+predicates.workspace = true
 
 [lints]
 workspace = true

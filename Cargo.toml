@@ -22,7 +22,7 @@ serde_json = "1.0.151"
 reqwest = { version = "0.13.4", features = ["json", "query", "gzip", "deflate", "brotli"] }
 thiserror = "2.0.20"
 dirs = "6.0.0"
-uuid = { version = "1.24.0", features = ["v4", "serde"] }
+uuid = { version = "1.24.1", features = ["v4", "serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 anyhow = "1.0.104"
@@ -30,9 +30,25 @@ toml = "1.1.4"
 schemars = { version = "1.2.2", features = ["uuid1"] }
 clap = { version = "4.6.6", features = ["derive"] }
 clap_complete = { version = "4.6.9", features = ["unstable-dynamic"] }
-clap_complete_nushell = "4.6.1"
-clap_mangen = "0.3.2"
+clap_complete_nushell = "4.6.2"
+clap_mangen = "0.3.3"
 clap-verbosity-flag = { version = "3.0.4", default-features = false, features = ["tracing"] }
+comfy-table = "8.0.0"
+rmcp = "3.1.4"
+axum = "0.8.9"
+tokio-util = "0.7.19"
+subtle = "2.6.1"
+sha2 = "0.11.0"
+base64 = "0.23.1"
+serde_urlencoded = "0.7.1"
+urlencoding = "2.1.3"
+tower-http = "0.7.0"
+wiremock = "0.6.5"
+tempfile = "3.27.0"
+tower = "0.5.3"
+url = "2.5.8"
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
 
 [workspace.lints.clippy]
 # Prevent panics from unwraps and unsafe slicing or indexing
