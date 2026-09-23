@@ -576,21 +576,37 @@ mod wire_tests {
     }
 
     /// Per SEP-2567 the 2026-07-28 protocol removed sessions, so a modern client
-    /// is served statelessly even though `legacy_session_mode` is on.
+    /// is served statelessly even though `legacy_session_mode` is on. It never
+    /// sends `initialize`; each request carries its own lifecycle `_meta`.
     #[tokio::test]
-    async fn modern_client_negotiates_2026_07_28_without_a_session() {
+    async fn modern_client_is_served_without_a_session() {
         let service = mcp_service();
-        let (status, headers, payloads) = post(&service, initialize(V_MODERN), None, None).await;
+        let (status, headers, payloads) =
+            post(&service, modern_tools_list(), None, Some(V_MODERN)).await;
+
+        assert!(
+            status.is_success(),
+            "tools/list failed: {status} {payloads:?}"
+        );
+        assert_eq!(result_of(&payloads)["resultType"], "complete");
+        assert!(
+            headers.get("mcp-session-id").is_none(),
+            "2026-07-28 requests must be stateless, got {headers:?}"
+        );
+    }
+
+    /// 2026-07-28 replaced the `initialize` handshake, so an `initialize` naming
+    /// it is answered with the newest version that still has one (rmcp >= 3.2).
+    #[tokio::test]
+    async fn initialize_naming_2026_07_28_falls_back_to_newest_legacy_version() {
+        let service = mcp_service();
+        let (status, _, payloads) = post(&service, initialize(V_MODERN), None, None).await;
 
         assert!(
             status.is_success(),
             "initialize failed: {status} {payloads:?}"
         );
-        assert_eq!(result_of(&payloads)["protocolVersion"], V_MODERN);
-        assert!(
-            headers.get("mcp-session-id").is_none(),
-            "2026-07-28 requests must be stateless, got {headers:?}"
-        );
+        assert_eq!(result_of(&payloads)["protocolVersion"], V_LEGACY);
     }
 
     /// The other half of dual mode: `legacy_session_mode` still gives pre-2026

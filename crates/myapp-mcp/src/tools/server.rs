@@ -7,7 +7,7 @@ use rmcp::model::{
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
-    model::{ListToolsResult, ServerInfo},
+    model::{ListToolsResult, ServerConfig},
     service::RequestContext,
 };
 
@@ -26,8 +26,8 @@ fn close_tool_schemas(tool: &mut Tool) {
 }
 
 impl ServerHandler for AppTools {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         // `ProtocolVersion::LATEST` still resolves to 2025-11-25
         // in rmcp 3.0 and will move in a later release.
         info.protocol_version = ProtocolVersion::V_2026_07_28;
