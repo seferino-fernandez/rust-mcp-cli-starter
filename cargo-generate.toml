@@ -1,11 +1,24 @@
 [template]
-cargo_generate_version = ">=0.21.0"
+cargo_generate_version = ">=0.23.0"
 # Files/dirs not copied into generated projects.
-# `pre-script.rhai` and `cargo-generate.toml` are template machinery, so they
-# are excluded here so neither appears in the user's generated project.
+# `pre-script.rhai` and `cargo-generate.toml` are template machinery, and
+# `.github/workflows/template.yml` is the template repo's own CI (it generates
+# a project and checks it), so none of them belong in the user's project.
 # (cargo-generate auto-removes `cargo-generate.toml`, but we list it
 # explicitly for clarity.)
-ignore = ["target", "pre-script.rhai", "cargo-generate.toml"]
+ignore = [
+    "target",
+    "pre-script.rhai",
+    "cargo-generate.toml",
+    ".github/workflows/template.yml",
+]
+# Files copied verbatim, without Liquid rendering. The justfile uses just's
+# own `{{shell}}` / `{{dir}}` interpolation, which Liquid would otherwise
+# render as empty strings. The pre hook's rename pass still applies to it.
+exclude = ["justfile"]
+
+[placeholders]
+github_org = { type = "string", prompt = "GitHub user or organization that will host the repository?", default = "your-org", regex = "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$" }
 
 [hooks]
 pre = ["pre-script.rhai"]
