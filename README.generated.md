@@ -1,17 +1,16 @@
-# Rust MCP + CLI Template
+# myapp
 
-A [`cargo-generate`](https://cargo-generate.github.io/cargo-generate/) starter
-template for wrapping an HTTP API as three Rust crates: a library, a CLI, and an
-MCP server. It targets the common case of an API authenticated with a single
-long-lived API key sent as an `X-Api-Key` header against a configurable base URL.
+An HTTP API wrapped as three Rust crates: a library, a CLI, and an MCP server.
+Requests are authenticated with a single long-lived API key sent as an
+`X-Api-Key` header against a configurable base URL.
 
 ## Crates
 
-| Crate        | Description                              |
-| ------------ | ---------------------------------------- |
-| `myapp-core` | Async API client library                 |
-| `myapp-cli`  | Terminal CLI (`myapp`)                   |
-| `myapp-mcp`  | MCP server (`myapp-mcp`) for LLM clients |
+| Crate | Description |
+| --- | --- |
+| `myapp-core` | Async API client library |
+| `myapp-cli` | Terminal CLI (`myapp`) |
+| `myapp-mcp` | MCP server (`myapp-mcp`) for LLM clients |
 
 The CLI and the MCP server both depend on the core library, so the request,
 auth, config, and error handling live in one place:
@@ -23,28 +22,7 @@ auth, config, and error handling live in one place:
      (clap CLI)   (rmcp: stdio + streamable HTTP)
 ```
 
-## Use this template
-
-```bash
-cargo generate --git https://github.com/seferino-fernandez/rust-mcp-cli-starter --name acme-tools --allow-commands
-```
-
-This renames everything (`myapp` → `acme-tools`, `MYAPP_` → `ACME_TOOLS_`).
-
-cargo-generate also prompts for `github_org`, the GitHub user or organization
-that will host the repository (default `your-org`). It fills in the
-`repository`/`homepage` URLs in `Cargo.toml` and the image path in
-`deploy/compose.yaml`. Pass it up front with `--define github_org=acme-corp`.
-
-The generated project gets its own `README.md` (from
-[`README.generated.md`](README.generated.md)) and an MIT `LICENSE.md` naming
-you (from your git `user.name`) with the current year.
-
-`--allow-commands` is required because the generation hook runs `sed`/`cargo fmt`
-to rename the project; without it, cargo-generate prompts for confirmation
-(interactive) or fails (with `--silent`).
-
-## Quick start (after generating)
+## Quick start
 
 Build the project:
 
@@ -63,6 +41,8 @@ Run a command from the CLI module:
 ```shell
 MYAPP_BASE_URL=http://localhost:8080 MYAPP_API_KEY=xxxx cargo run -p myapp-cli -- status
 ```
+
+## Configuration
 
 Configuration is layered, highest precedence first:
 CLI flag, then `MYAPP_*` env, then `MYAPP_*_FILE` env, then `config.toml`, then

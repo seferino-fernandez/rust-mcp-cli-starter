@@ -1,0 +1,122 @@
+name: Template Generation
+
+on:
+    push:
+        branches: ["main"]
+    pull_request:
+        branches: ["main"]
+    schedule:
+        # Weekly, to catch dependency and toolchain drift.
+        - cron: "0 6 * * 1"
+    workflow_dispatch:
+
+env:
+    CARGO_TERM_COLOR: always
+    CARGO_INCREMENTAL: 0
+    RUSTFLAGS: -D warnings
+    CARGO_PROFILE_TEST_DEBUG: 0
+    PROJECT_NAME: acme-tools
+
+jobs:
+    generate:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  lfs: true
+
+            # rustfmt must be present before generation: the pre hook runs `cargo fmt`.
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: clippy,rustfmt
+
+            # cargo-generate is installed via the cargo-binstall fallback;
+            # install-action passes github.token to it automatically.
+            - name: Install cargo-generate and cargo nextest
+              uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-generate@0.25.0,cargo-nextest
+
+            # Generate outside the checkout, otherwise cargo-generate adds the
+            # output to the template's own workspace.
+            - name: Generate project from template
+              run: |
+                  cargo generate \
+                      --path "$GITHUB_WORKSPACE" \
+                      --name "$PROJECT_NAME" \
+                      --allow-commands \
+                      --silent \
+                      --define github_org=acme-corp \
+                      --define 'authors=Template CI <ci@example.com>' \
+                      --destination "$RUNNER_TEMP"
+                  echo "PROJECT_DIR=$RUNNER_TEMP/$PROJECT_NAME" >> "$GITHUB_ENV"
+
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: ${{ env.PROJECT_DIR }}
+
+            # Case-sensitive on purpose: tests legitimately contain "MyApp".
+            - name: Check for leftover template identifiers
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: |
+                  if hits=$(grep -rnI -e myapp -e MYAPP -e Seferino -e your-org -e your-project . \
+                      --exclude-dir=target --exclude-dir=.git); then
+                      echo "::error::Generated project contains leftover template identifiers:"
+                      echo "$hits"
+                      exit 1
+                  fi
+
+            - name: Check template machinery is not shipped
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: |
+                  status=0
+                  for f in pre-script.rhai cargo-generate.toml README.generated.md .github/workflows/template.yml; do
+                      if [ -e "$f" ]; then
+                          echo "::error::Template file '$f' should not exist in the generated project"
+                          status=1
+                      fi
+                  done
+                  if [ ! -f Cargo.lock ]; then
+                      echo "::error::Generated project is missing Cargo.lock"
+                      status=1
+                  fi
+                  if ! grep -qF "Copyright (c) $(date -u +%Y) Template CI" LICENSE.md; then
+                      echo "::error::LICENSE.md does not name the generating author and current year"
+                      status=1
+                  fi
+                  exit "$status"
+
+            - name: Check justfile recipe arguments survived Liquid rendering
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: |
+                  status=0
+                  for pattern in 'completions {{shell}}' 'man {{dir}}'; do
+                      if ! grep -qF "$pattern" justfile; then
+                          echo "::error::justfile is missing '$pattern'"
+                          status=1
+                      fi
+                  done
+                  exit "$status"
+
+            - name: Run cargo fmt
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: cargo fmt --all --check
+
+            # Runs before clippy/tests so the lockfile is verified before any
+            # cargo command could rewrite it.
+            - name: Compile
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: cargo check --locked
+
+            - name: Run cargo clippy
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: cargo clippy --all-targets --all-features -- -D warnings
+
+            - name: Run tests
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: cargo nextest run --all-targets --all-features
+
+            - name: Run doc tests
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: cargo test --doc
