@@ -675,11 +675,13 @@ mod wire_tests {
         assert_eq!(result["tools"].as_array().map(Vec::len), Some(5));
     }
 
-    /// `ProtocolVersion::LATEST` still resolves to 2025-11-25 in rmcp 3.0, which
-    /// is why `get_info` names 2026-07-28 explicitly. If this ever fails, the SDK
-    /// moved its default and the hardcoded constant should be revisited.
+    /// `ProtocolVersion::LATEST` caught up to 2026-07-28 in rmcp 3.5, but
+    /// `get_info` still names 2026-07-28 explicitly so an SDK bump can't make
+    /// this server advertise a version it hasn't implemented. If this ever
+    /// fails, the SDK moved its default and the hardcoded constant should be
+    /// revisited.
     #[test]
-    fn sdk_latest_still_lags_the_version_we_advertise() {
-        assert_eq!(ProtocolVersion::LATEST, ProtocolVersion::V_2025_11_25);
+    fn sdk_latest_matches_the_version_we_advertise() {
+        assert_eq!(ProtocolVersion::LATEST, ProtocolVersion::V_2026_07_28);
     }
 }

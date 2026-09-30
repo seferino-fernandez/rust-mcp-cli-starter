@@ -12,7 +12,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/your-org/your-project"
 homepage = "https://github.com/your-org/your-project"
-rust-version = "1.97"
+rust-version = "1.98"
 
 [workspace.dependencies]
 myapp-core = { version = "0.1.0", path = "crates/myapp-core" }
@@ -20,7 +20,7 @@ tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "s
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 reqwest = { version = "0.13.5", features = ["json", "query", "gzip", "deflate", "brotli"] }
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 dirs = "7.0.0"
 uuid = { version = "1.26.1", features = ["v4", "serde"] }
 tracing = "0.1.44"
@@ -33,8 +33,8 @@ clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 clap_complete_nushell = "4.6.2"
 clap_mangen = "0.3.3"
 clap-verbosity-flag = { version = "3.0.4", default-features = false, features = ["tracing"] }
-comfy-table = "8.0.0"
-rmcp = "3.4.0"
+comfy-table = "8.0.1"
+rmcp = "3.5.0"
 axum = "0.8.9"
 tokio-util = "0.7.19"
 subtle = "2.6.1"

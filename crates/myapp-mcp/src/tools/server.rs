@@ -28,8 +28,8 @@ fn close_tool_schemas(tool: &mut Tool) {
 impl ServerHandler for AppTools {
     fn get_info(&self) -> ServerConfig {
         let mut info = ServerConfig::default();
-        // `ProtocolVersion::LATEST` still resolves to 2025-11-25
-        // in rmcp 3.0 and will move in a later release.
+        // Named explicitly rather than taken from `ProtocolVersion::LATEST`,
+        // which follows the SDK and may move past what this server implements.
         info.protocol_version = ProtocolVersion::V_2026_07_28;
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))

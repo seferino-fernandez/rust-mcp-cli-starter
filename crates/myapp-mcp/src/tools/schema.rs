@@ -290,9 +290,9 @@ mod router_tests {
         }
     }
 
-    /// Pins the advertised protocol version. `ProtocolVersion::LATEST` still
-    /// resolves to 2025-11-25 in rmcp 3.0 and will move in a later release, so
-    /// this server names its version explicitly.
+    /// Pins the advertised protocol version. `ProtocolVersion::LATEST` follows
+    /// the SDK and may move past what this server implements, so this server
+    /// names its version explicitly.
     #[test]
     fn advertises_current_protocol_version() {
         use rmcp::ServerHandler;
