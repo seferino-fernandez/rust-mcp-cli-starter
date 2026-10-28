@@ -12,33 +12,33 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/your-org/your-project"
 homepage = "https://github.com/your-org/your-project"
-rust-version = "1.98"
+rust-version = "1.99"
 
 [workspace.dependencies]
 myapp-core = { version = "0.1.0", path = "crates/myapp-core" }
-tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 reqwest = { version = "0.13.5", features = ["json", "query", "gzip", "deflate", "brotli"] }
 thiserror = "2.0.21"
 dirs = "7.0.0"
-uuid = { version = "1.26.1", features = ["v4", "serde"] }
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 anyhow = "1.0.104"
-toml = "1.1.6"
-schemars = { version = "1.2.2", features = ["uuid1"] }
+toml = "1.1.8"
+schemars = { version = "1.2.3", features = ["uuid1"] }
 clap = { version = "4.6.7", features = ["derive"] }
 clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 clap_complete_nushell = "4.6.2"
 clap_mangen = "0.3.3"
 clap-verbosity-flag = { version = "3.0.4", default-features = false, features = ["tracing"] }
 comfy-table = "8.0.1"
-rmcp = "3.5.0"
+rmcp = "3.8.0"
 axum = "0.8.9"
-tokio-util = "0.7.19"
+tokio-util = "0.7.20"
 subtle = "2.6.1"
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 base64 = "0.23.1"
 serde_urlencoded = "0.7.1"
 urlencoding = "2.1.3"
