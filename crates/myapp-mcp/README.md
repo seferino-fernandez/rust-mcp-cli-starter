@@ -80,15 +80,16 @@ myapp-mcp --transport http --auth-mode oauth --port 8080
   required when binding a non-loopback address, and an empty, whitespace-only,
   or shorter-than-8-character PIN is refused at startup on any bind.
 - **Wrong-PIN lockout.** Wrong PINs from every client count together: five
-  within a minute lock approvals out for 60 s, and after that each further
-  wrong PIN locks them out for another 60 s, answered with
-  `429 Too Many Requests` and `Retry-After`. Each lockout logs a warning with
-  its retry-after seconds, never the PIN. A correct PIN, or 15 quiet minutes,
-  resets the count. The limiter is global, so anyone who can reach the
-  consent endpoint can also lock the owner out; the one-minute cap is the
-  trade-off. It bounds that denial of service to about a minute per lockout,
-  while holding a guesser to roughly one guess a minute, which keeps brute
-  force against an 8-character PIN infeasible.
+  within a minute lock approvals out for 60 s, and each further wrong PIN
+  after a lockout ends starts one twice as long, up to 15 minutes, answered
+  with `429 Too Many Requests` and `Retry-After`. Each lockout logs a warning
+  with its retry-after seconds, never the PIN. A correct PIN, or 15 quiet
+  minutes after the last lockout ends, resets the count. The limiter is
+  global on purpose: a per-IP limiter would be spoofable, or meaningless
+  behind a proxy. So anyone who can reach the consent endpoint can delay the
+  owner by up to 15 minutes at a time. That was chosen over a shorter cap,
+  which would make PIN guessing easier: a one-minute cap would allow about
+  1,440 guesses a day.
 - **Registration.** Clients are public: no `client_secret` is issued and
   `token_endpoint_auth_method` is `none`. Each redirect URI must be an
   absolute URL with no fragment and none of `code`, `state`, `error`,
@@ -102,13 +103,22 @@ myapp-mcp --transport http --auth-mode oauth --port 8080
   for 24 hours is dropped.
 - **Authorization.** `/oauth/authorize` checks the client and redirect URI
   first and never redirects on an error; every error, including a malformed
-  query, is a JSON `400`. `state` may be at most 512 bytes, and
+  query, is a JSON `400`. `state` may be at most 2048 bytes, and
   `code_challenge` must be 43 to 128 characters of `A-Z a-z 0-9 - . _ ~`.
   The validated request is held on the server under a single-use consent
-  nonce (valid for `oauth_csrf_nonce_ttl_secs`); at most 1024 are held at
-  once, and past that `/oauth/authorize` gets `429`. The consent page,
-  rendered on the server, posts back only that nonce, the decision and the
-  PIN, and a nonce whose client has since been removed is refused.
+  nonce (valid for `oauth_csrf_nonce_ttl_secs`). The consent page, rendered
+  on the server, posts back only that nonce, the decision and the PIN, and a
+  nonce whose client has since been removed is refused.
+- **Pending-authorization limits.** At most 16 pending requests are held per
+  client and 1024 in all. A new request is never refused: past a client's
+  limit it evicts that client's oldest, and past the global limit the oldest
+  of all, and an evicted nonce is refused at consent. One client cannot evict
+  another's request this way until the global limit is reached.
+- **Availability.** Registration is open, so a sustained flood from many
+  registered clients can still evict a legitimate pending authorization
+  before the owner approves it, and can keep registration at its cap. Before
+  exposing the OAuth server publicly, put a rate limiter or reverse proxy in
+  front of it that limits `/oauth/register` and `/oauth/authorize`.
 - **Errors.** Every OAuth endpoint answers a body or query it cannot parse
   with a JSON OAuth error that does not echo the input.
 - **Tokens.** Access tokens last `oauth_token_expiry_secs`. Refresh tokens
