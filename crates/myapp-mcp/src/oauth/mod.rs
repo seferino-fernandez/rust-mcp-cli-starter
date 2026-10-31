@@ -6,12 +6,15 @@
 //!
 //! - [`endpoints`]: `/authorize`, `/token`, `/register`, and the well-known
 //!   metadata endpoints.
+//! - [`limiter`]: the global limiter on wrong consent PINs.
 //! - [`model`]: models used for oauth.
 //! - [`pkce`]: code-challenge generation and verification.
-//! - [`store`]: in-memory storage for authorization codes, access tokens,
-//!   CSRF nonces, and registered clients with periodic eviction.
+//! - [`store`]: in-memory storage for authorization codes, access and
+//!   refresh tokens, pending authorizations, and registered clients with
+//!   periodic eviction.
 
 pub mod endpoints;
+pub mod limiter;
 pub mod model;
 pub mod pkce;
 pub mod store;

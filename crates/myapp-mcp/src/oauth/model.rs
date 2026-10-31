@@ -1,22 +1,41 @@
+use std::sync::{Arc, Mutex};
+
 use serde::Deserialize;
 
+use crate::oauth::limiter::PinLimiter;
 use crate::oauth::store::OAuthStore;
+use crate::secret_digest::SecretDigest;
 
+/// The consent form posted to `POST /oauth/approve`. Everything it grants
+/// comes from the [`PendingAuthorization`] stored under `consent_nonce`.
 #[derive(Debug, Deserialize)]
 pub struct ApprovalForm {
-    pub client_id: String,
-    pub redirect_uri: String,
-    pub scope: String,
-    pub state: Option<String>,
-    pub code_challenge: String,
-    #[expect(
-        dead_code,
-        reason = "validated on GET /authorize; carried through the form for completeness"
-    )]
-    pub code_challenge_method: String,
+    pub consent_nonce: String,
     pub approved: String,
     pub pin: Option<String>,
-    pub csrf_nonce: String,
+}
+
+/// An authorization request `GET /oauth/authorize` has validated, held until
+/// the consent form is posted with its nonce.
+#[derive(Clone, Debug)]
+pub struct PendingAuthorization {
+    pub client_id: String,
+    /// The name the client registered with, shown on the consent page.
+    pub client_name: Option<String>,
+    /// The registered redirect URI exactly as the request named it. This is
+    /// what the authorization code is bound to, because `/token` compares it
+    /// byte for byte.
+    pub redirect_uri: String,
+    /// `redirect_uri` parsed, used only to build redirects and to display
+    /// the host. It may serialise differently from `redirect_uri`.
+    pub redirect_url: url::Url,
+    /// The requested scopes, kept to `read` and `write`; `read` when none are.
+    pub scopes: Vec<String>,
+    /// The PKCE challenge the authorization code will be bound to.
+    pub code_challenge: String,
+    /// The PKCE method of `code_challenge`; always `S256` once validated.
+    pub code_challenge_method: String,
+    pub state: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -48,7 +67,11 @@ pub struct AuthorizeQuery {
 pub struct OAuthEndpointState {
     pub store: OAuthStore,
     pub base_url: String,
-    pub oauth_pin: Option<String>,
+    /// The consent PIN's digest; `None` when no PIN is configured.
+    pub oauth_pin: Option<SecretDigest>,
+    /// Shared by every client, so wrong PINs from all callers add up. Never
+    /// held across an `.await`.
+    pub pin_limiter: Arc<Mutex<PinLimiter>>,
 }
 
 #[derive(serde::Serialize)]

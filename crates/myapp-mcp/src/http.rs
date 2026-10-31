@@ -25,6 +25,14 @@ use rmcp::transport::streamable_http_server::{
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+/// Every way to set the OAuth consent PIN, named by every PIN refusal.
+const OAUTH_PIN_SETTINGS: &str = "pass --oauth-pin <value>, set MYAPP_MCP_OAUTH_PIN or \
+                                  MYAPP_MCP_OAUTH_PIN_FILE, or add [mcp] oauth_pin = \"...\" or \
+                                  oauth_pin_file = \"...\" to config.toml";
+
+/// The fewest Unicode characters a configured consent PIN may have.
+const MIN_OAUTH_PIN_CHARS: usize = 8;
+
 /// The HTTP transport's authentication, resolved from config with the data
 /// each mode needs.
 #[derive(Debug)]
@@ -53,9 +61,12 @@ impl HttpAuth {
     /// - `token`: a non-empty, non-whitespace token must be present.
     /// - `none`: only allowed on a loopback address.
     /// - `oauth`: refuses a wildcard CORS origin (any site could drive the
-    ///   flow) and refuses plain HTTP on a non-loopback address (tokens/PKCE
+    ///   flow), refuses plain HTTP on a non-loopback address (tokens/PKCE
     ///   would traverse the network unencrypted) unless
-    ///   `oauth_allow_insecure_http` is set.
+    ///   `oauth_allow_insecure_http` is set, refuses a non-loopback address
+    ///   without a consent PIN (any caller could approve itself), and refuses
+    ///   an empty or whitespace-only PIN, or one shorter than
+    ///   [`MIN_OAUTH_PIN_CHARS`] characters, on any bind.
     fn resolve(config: &ServerConfig, addr: &SocketAddr) -> anyhow::Result<Self> {
         match config.mcp.auth_mode {
             AuthMode::Token => {
@@ -106,10 +117,29 @@ impl HttpAuth {
                          a trusted private network, set [mcp] oauth_allow_insecure_http = true."
                     );
                 }
-                Ok(Self::OAuth(OAuthSettings {
-                    base_url,
-                    pin: config.mcp.oauth_pin.clone(),
-                }))
+                let pin = config.mcp.oauth_pin.clone();
+                match pin.as_ref().map(SecretString::expose_secret) {
+                    Some(pin) if pin.trim().is_empty() => anyhow::bail!(
+                        "auth_mode=\"oauth\" refuses an empty consent PIN: an empty or \
+                         whitespace-only PIN is a misconfiguration, not a request for no PIN. \
+                         Set a PIN of at least {MIN_OAUTH_PIN_CHARS} characters: \
+                         {OAUTH_PIN_SETTINGS}."
+                    ),
+                    Some(pin) if pin.chars().count() < MIN_OAUTH_PIN_CHARS => anyhow::bail!(
+                        "auth_mode=\"oauth\" refuses a consent PIN shorter than \
+                         {MIN_OAUTH_PIN_CHARS} characters: a short PIN can be guessed. Set a \
+                         longer PIN: {OAUTH_PIN_SETTINGS}."
+                    ),
+                    None if !addr.ip().is_loopback() => anyhow::bail!(
+                        "auth_mode=\"oauth\" on a non-loopback address ({addr}) requires a \
+                         consent PIN: without one, any client that can reach the server can \
+                         approve its own authorization request and mint a full-access token. \
+                         Set a PIN of at least {MIN_OAUTH_PIN_CHARS} characters: \
+                         {OAUTH_PIN_SETTINGS}."
+                    ),
+                    _ => {}
+                }
+                Ok(Self::OAuth(OAuthSettings { base_url, pin }))
             }
         }
     }
@@ -188,7 +218,10 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
             let endpoint_state = Arc::new(OAuthEndpointState {
                 store: store.clone(),
                 base_url: base_url.clone(),
-                oauth_pin: pin.map(|secret| secret.expose_secret().to_string()),
+                oauth_pin: pin
+                    .as_ref()
+                    .map(|secret| SecretDigest::new(secret.expose_secret())),
+                pin_limiter: Arc::default(),
             });
 
             let middleware_state = OAuthMiddlewareState {
@@ -405,10 +438,14 @@ mod tests {
         assert_eq!(allowed.as_deref(), Some("http://127.0.0.1"));
     }
 
+    /// A PIN long enough to pass the startup rules.
+    const VALID_PIN: &str = "12345678";
+
     fn oauth_config(
         origins: Vec<&str>,
         base_url: Option<&str>,
         allow_insecure: bool,
+        pin: Option<&str>,
     ) -> ServerConfig {
         let mut config = ServerConfig::default();
         config.mcp.auth_mode = AuthMode::OAuth;
@@ -417,6 +454,7 @@ mod tests {
         };
         config.mcp.base_url = base_url.map(str::to_string);
         config.mcp.oauth_allow_insecure_http = allow_insecure;
+        config.mcp.oauth_pin = pin.map(SecretString::from);
         config
     }
 
@@ -428,9 +466,28 @@ mod tests {
         SocketAddr::from(([127, 0, 0, 1], 8080))
     }
 
+    /// Asserts the refusal names every way to set the PIN.
+    fn assert_names_pin_settings(err: &anyhow::Error) {
+        let message = err.to_string();
+        for setting in [
+            "--oauth-pin",
+            "MYAPP_MCP_OAUTH_PIN",
+            "MYAPP_MCP_OAUTH_PIN_FILE",
+            "[mcp] oauth_pin",
+            "oauth_pin_file",
+        ] {
+            assert!(message.contains(setting), "missing {setting} in: {message}");
+        }
+    }
+
     #[test]
     fn oauth_refuses_wildcard_cors_origin() {
-        let config = oauth_config(vec!["*"], Some("https://mcp.example.com"), false);
+        let config = oauth_config(
+            vec!["*"],
+            Some("https://mcp.example.com"),
+            false,
+            Some(VALID_PIN),
+        );
         let err = HttpAuth::resolve(&config, &non_loopback())
             .expect_err("wildcard CORS under oauth must be refused");
         assert!(err.to_string().contains("wildcard"), "got: {err}");
@@ -442,6 +499,7 @@ mod tests {
             vec!["https://app.example.com"],
             Some("http://mcp.example.com"),
             false,
+            Some(VALID_PIN),
         );
         let err = HttpAuth::resolve(&config, &non_loopback())
             .expect_err("plaintext oauth off-loopback must be refused");
@@ -454,6 +512,7 @@ mod tests {
             vec!["https://app.example.com"],
             Some("http://mcp.example.com"),
             true,
+            Some(VALID_PIN),
         );
         HttpAuth::resolve(&config, &non_loopback())
             .expect("override permits plaintext oauth off-loopback");
@@ -461,20 +520,114 @@ mod tests {
 
     #[test]
     fn oauth_carries_the_base_url_and_pin() {
-        let mut config = oauth_config(
+        let config = oauth_config(
             vec!["https://app.example.com"],
             Some("https://mcp.example.com"),
             false,
+            Some(VALID_PIN),
         );
-        config.mcp.oauth_pin = Some(SecretString::from("pin"));
         let HttpAuth::OAuth(settings) = HttpAuth::resolve(&config, &non_loopback()).unwrap() else {
             panic!("auth_mode=oauth must resolve to HttpAuth::OAuth");
         };
         assert_eq!(settings.base_url, "https://mcp.example.com");
         assert_eq!(
             settings.pin.as_ref().map(SecretString::expose_secret),
-            Some("pin")
+            Some(VALID_PIN)
         );
+    }
+
+    #[test]
+    fn oauth_refuses_no_pin_on_non_loopback_https() {
+        let config = oauth_config(
+            vec!["https://app.example.com"],
+            Some("https://mcp.example.com"),
+            false,
+            None,
+        );
+        let err = HttpAuth::resolve(&config, &non_loopback())
+            .expect_err("pinless oauth off-loopback must be refused");
+        assert!(err.to_string().contains("consent PIN"), "got: {err}");
+        assert_names_pin_settings(&err);
+    }
+
+    #[test]
+    fn oauth_insecure_http_override_does_not_waive_pin() {
+        let config = oauth_config(
+            vec!["https://app.example.com"],
+            Some("http://mcp.example.com"),
+            true,
+            None,
+        );
+        let err = HttpAuth::resolve(&config, &non_loopback())
+            .expect_err("oauth_allow_insecure_http must not waive the PIN");
+        assert!(err.to_string().contains("consent PIN"), "got: {err}");
+        assert_names_pin_settings(&err);
+    }
+
+    /// An oauth config on `addr` with `pin`, served over HTTPS off loopback.
+    fn oauth_config_for(addr: &SocketAddr, pin: &str) -> ServerConfig {
+        if addr.ip().is_loopback() {
+            oauth_config(vec!["http://localhost"], None, false, Some(pin))
+        } else {
+            oauth_config(
+                vec!["https://app.example.com"],
+                Some("https://mcp.example.com"),
+                false,
+                Some(pin),
+            )
+        }
+    }
+
+    #[test]
+    fn oauth_refuses_empty_or_whitespace_pin_on_every_bind() {
+        for pin in ["", " ", "        ", "\t\n         "] {
+            for addr in [loopback(), non_loopback()] {
+                let err = HttpAuth::resolve(&oauth_config_for(&addr, pin), &addr)
+                    .expect_err("a blank PIN must be refused");
+                assert!(
+                    err.to_string().contains("empty consent PIN"),
+                    "pin={pin:?} addr={addr} got: {err}"
+                );
+                assert_names_pin_settings(&err);
+            }
+        }
+    }
+
+    #[test]
+    fn oauth_refuses_seven_character_pin_on_every_bind() {
+        // Seven characters, counted as characters: the second is 14 bytes.
+        for pin in ["1234567", "ñññññññ"] {
+            for addr in [loopback(), non_loopback()] {
+                let err = HttpAuth::resolve(&oauth_config_for(&addr, pin), &addr)
+                    .expect_err("a 7-character PIN must be refused");
+                assert!(
+                    err.to_string().contains("shorter than 8 characters"),
+                    "pin={pin:?} addr={addr} got: {err}"
+                );
+                assert_names_pin_settings(&err);
+            }
+        }
+    }
+
+    #[test]
+    fn oauth_allows_eight_character_pin_on_every_bind() {
+        for pin in [VALID_PIN, "éééééééé"] {
+            for addr in [loopback(), non_loopback()] {
+                HttpAuth::resolve(&oauth_config_for(&addr, pin), &addr)
+                    .unwrap_or_else(|err| panic!("pin={pin:?} addr={addr}: {err}"));
+            }
+        }
+    }
+
+    #[test]
+    fn oauth_allows_no_pin_on_loopback() {
+        let config = oauth_config(vec!["http://localhost"], None, false, None);
+        let HttpAuth::OAuth(settings) =
+            HttpAuth::resolve(&config, &loopback()).expect("pinless oauth on loopback is allowed")
+        else {
+            panic!("auth_mode=oauth must resolve to HttpAuth::OAuth");
+        };
+        assert!(settings.pin.is_none());
     }
 
     #[test]

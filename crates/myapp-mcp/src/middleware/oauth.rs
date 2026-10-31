@@ -40,7 +40,7 @@ pub async fn oauth_bearer_auth(
         }
     };
 
-    if let Some(access_token) = state.store.validate_access_token(token).await {
+    if let Some(access_token) = state.store.validate_access_token(token) {
         tracing::debug!(
             %method, %uri,
             scope = ?access_token.scope,

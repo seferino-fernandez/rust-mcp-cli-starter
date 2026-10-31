@@ -17,6 +17,7 @@
   .pin-field { margin: 1rem 0; }
   .pin-field input { width: 100%; padding: 0.5rem; border: 1px solid #ddd;
                      border-radius: 6px; font-size: 1rem; }
+  .client-id { color: #666; font-size: 0.8rem; word-break: break-all; }
   .buttons { display: flex; gap: 0.75rem; margin-top: 1.5rem; }
   .btn { flex: 1; padding: 0.75rem; border: none; border-radius: 8px; font-size: 1rem;
          cursor: pointer; font-weight: 500; }
@@ -29,54 +30,25 @@
 <body>
 <div class="card">
   <h1>Authorize MCP Client</h1>
-  <p><strong id="client-name"></strong> is requesting access:</p>
-  <div class="scope-list" id="scope-list"></div>
-  <div class="pin-field" id="pin-section" style="display:none">
-    <label for="pin">Enter PIN to authorize:</label>
-    <input type="password" id="pin" name="pin" autocomplete="off">
+  <p><strong>[[client_name]]</strong> is requesting access:</p>
+  <p class="client-id">Client ID: [[client_id]]</p>
+  <p>You will be returned to <strong>[[redirect_host]]</strong>.</p>
+  <div class="scope-list">
+[[scope_items]]
   </div>
   <form id="auth-form" method="POST" action="/oauth/approve">
-    <input type="hidden" name="client_id" id="f-client-id">
-    <input type="hidden" name="redirect_uri" id="f-redirect-uri">
-    <input type="hidden" name="scope" id="f-scope">
-    <input type="hidden" name="state" id="f-state">
-    <input type="hidden" name="code_challenge" id="f-code-challenge">
-    <input type="hidden" name="code_challenge_method" id="f-code-challenge-method">
+    <input type="hidden" name="consent_nonce" value="[[consent_nonce]]">
     <input type="hidden" name="approved" id="f-approved" value="false">
-    <input type="hidden" name="pin" id="f-pin" value="">
-    <input type="hidden" name="csrf_nonce" id="f-csrf-nonce" value="">
+[[pin_field]]
     <div class="buttons">
       <button type="button" class="btn btn-deny" onclick="deny()">Deny</button>
-      <button type="button" class="btn btn-approve" onclick="approve()">Approve</button>
+      <button type="submit" class="btn btn-approve" onclick="approve()">Approve</button>
     </div>
   </form>
 </div>
 <script>
-  const params = new URLSearchParams(window.location.search);
-  document.getElementById('f-client-id').value = params.get('client_id') || '';
-  document.getElementById('f-redirect-uri').value = params.get('redirect_uri') || '';
-  document.getElementById('f-scope').value = params.get('scope') || 'read';
-  document.getElementById('f-state').value = params.get('state') || '';
-  document.getElementById('f-code-challenge').value = params.get('code_challenge') || '';
-  document.getElementById('f-code-challenge-method').value = params.get('code_challenge_method') || '';
-  document.getElementById('f-csrf-nonce').value = document.body.dataset.csrfNonce || '';
-  document.getElementById('client-name').textContent = params.get('client_id') || 'Unknown client';
-  const scopes = (params.get('scope') || 'read').split(' ');
-  const list = document.getElementById('scope-list');
-  scopes.forEach(s => {
-    const div = document.createElement('div');
-    div.className = 'scope-item';
-    div.textContent = s === 'read' ? 'Read-only access to the API'
-                    : s === 'write' ? 'Read and write access to the API' : s;
-    list.appendChild(div);
-  });
-  if (document.body.dataset.pinRequired === 'true') {
-    document.getElementById('pin-section').style.display = 'block';
-  }
   function approve() {
     document.getElementById('f-approved').value = 'true';
-    document.getElementById('f-pin').value = document.getElementById('pin')?.value || '';
-    document.getElementById('auth-form').submit();
   }
   function deny() {
     document.getElementById('f-approved').value = 'false';

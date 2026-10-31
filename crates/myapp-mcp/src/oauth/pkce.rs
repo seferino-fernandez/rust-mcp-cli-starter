@@ -9,6 +9,15 @@ pub fn verify_s256(verifier: &str, challenge: &str) -> bool {
     computed == challenge
 }
 
+/// Verify a PKCE code challenge made with `method`. Only `S256` is
+/// supported, so any other method never verifies.
+pub fn verify(method: &str, verifier: &str, challenge: &str) -> bool {
+    match method {
+        "S256" => verify_s256(verifier, challenge),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 pub fn challenge_from_verifier(verifier: &str) -> String {
     let hash = Sha256::digest(verifier.as_bytes());
@@ -39,5 +48,14 @@ mod tests {
         let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
         let expected_challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
         assert!(verify_s256(verifier, expected_challenge));
+    }
+
+    #[test]
+    fn verify_accepts_only_s256() {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = challenge_from_verifier(verifier);
+        assert!(verify("S256", verifier, &challenge));
+        assert!(!verify("plain", verifier, verifier));
+        assert!(!verify("s256", verifier, &challenge));
     }
 }
