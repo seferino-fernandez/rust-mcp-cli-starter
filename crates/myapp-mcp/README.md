@@ -166,17 +166,23 @@ Every call goes through the same checks, in order:
    hint, answers an `insufficient_scope` tool error before anything else
    runs. `tools/list` is the same for every token, so a `read` token still
    sees the write tools. Static-token, `none` and stdio callers carry no
-   scopes and may call every tool.
+   scopes and may call every tool. In OAuth mode a request that somehow
+   reaches a tool without scopes fails closed: it may call only read-only
+   tools.
 2. **Arguments.** An argument the tool's input schema does not declare is
    refused, without contacting the upstream API. Every params struct also
    denies unknown fields.
 3. **Confirmation.** A tool annotated `destructiveHint: true`, called by a
    client that negotiated 2026-07-28 and supports form elicitation, first
-   answers an input-required result asking the user to confirm. The pending
-   call is sealed into its `requestState` (valid for 5 minutes, bound to the
-   tool name, keyed per process). The retry must carry the same arguments and
-   an accepted `confirm: true`; changed arguments, a decline or a cancel are
-   refused. Clients without form elicitation, or on an older protocol, run the
+   answers an input-required result asking the user to confirm. Its
+   arguments are decoded first, so a mistyped one fails before the user is
+   asked. The pending call is sealed into its `requestState` (valid for 5
+   minutes, bound to the tool name, keyed per process). The retry must carry
+   the same arguments and an accepted `confirm: true`; changed arguments, a
+   decline or a cancel are refused. An accepted state is single-use: a
+   replay is refused. The server remembers up to 4096 spent states; past
+   that it forgets the oldest early, so under that much confirmation traffic
+   a spent state could be replayed, but only within its 5 minutes. Clients without form elicitation, or on an older protocol, run the
    tool directly. Turn the prompt off with `[mcp] confirm_destructive = false`
    or `MYAPP_MCP_CONFIRM_DESTRUCTIVE=false`. This is a courtesy against a
    model acting alone, not access control: the `write` scope is.
