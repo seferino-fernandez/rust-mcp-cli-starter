@@ -29,7 +29,7 @@ pub mod secret;
 
 pub use client::ApiClient;
 pub use config::{Config, ConfigOverrides, ConfigPathSource};
-pub use error::Error;
+pub use error::{ConfigError, Error};
 pub use redact::Redacted;
 pub use secret::SecretString;
 

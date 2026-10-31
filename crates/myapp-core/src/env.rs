@@ -10,11 +10,12 @@
 //! unset. The typed parsers [`env_parse`](crate::env::env_parse) and
 //! [`env_parse_bool`](crate::env::env_parse_bool) trim the value first, treat
 //! an empty or whitespace-only value as unset, and fail with
-//! [`Error::Config`] naming the variable and its raw value when the value does
-//! not parse, so a typo never silently falls back to a lower layer.
+//! [`ConfigError::InvalidEnvValue`] naming the variable and its raw value when
+//! the value does not parse, so a typo never silently falls back to a lower
+//! layer.
 
 use crate::Result;
-use crate::error::Error;
+use crate::error::ConfigError;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::str::FromStr;
@@ -91,7 +92,8 @@ pub fn env_non_empty(env: &impl Env, key: &str) -> Option<String> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Config`] with the message
+/// Returns [`Error::Config`](crate::Error::Config) holding
+/// [`ConfigError::InvalidEnvValue`], with the message
 /// `invalid <KEY> value "<raw>": <reason>` when the trimmed value does not
 /// parse as `T`. `<raw>` is the value as set, before trimming.
 ///
@@ -130,7 +132,8 @@ where
 ///
 /// # Errors
 ///
-/// Returns [`Error::Config`] with the message
+/// Returns [`Error::Config`](crate::Error::Config) holding
+/// [`ConfigError::InvalidEnvValue`], with the message
 /// `invalid <KEY> value "<raw>": <reason>` for any other value, where
 /// `<reason>` lists the accepted spellings.
 ///
@@ -173,9 +176,14 @@ fn parse_trimmed<T>(
     if value.is_empty() {
         return Ok(None);
     }
-    parse(value)
-        .map(Some)
-        .map_err(|reason| Error::Config(format!("invalid {key} value {raw:?}: {reason}")))
+    parse(value).map(Some).map_err(|reason| {
+        ConfigError::InvalidEnvValue {
+            key: key.to_string(),
+            raw,
+            reason,
+        }
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -207,7 +215,13 @@ mod tests {
     fn bool_rejects_unrecognized_value_naming_variable_and_value() {
         let env = MapEnv::new().with("FLAG", "maybe");
         let err = env_parse_bool(&env, "FLAG").unwrap_err();
-        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        assert!(
+            matches!(
+                err,
+                crate::Error::Config(ConfigError::InvalidEnvValue { .. })
+            ),
+            "{err:?}"
+        );
         assert!(
             err.to_string().contains(r#"invalid FLAG value "maybe""#),
             "{err}"

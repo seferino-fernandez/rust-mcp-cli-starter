@@ -8,7 +8,7 @@
 
 use crate::Result;
 use crate::env::{Env, SystemEnv, env_non_empty, env_parse};
-use crate::error::Error;
+use crate::error::ConfigError;
 use crate::secret::SecretString;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -199,12 +199,17 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Config`] when the file named by `path` or
-    /// `MYAPP_CONFIG` does not exist, when the TOML does not parse (reporting
-    /// line and column, never the source line), when both `api_key` and
-    /// `api_key_file` are set in the file, or when a `MYAPP_*` variable holds a
-    /// value that does not parse. Returns [`Error::Io`] when a configuration or
-    /// secret file cannot be read.
+    /// Returns [`Error::Config`](crate::Error::Config) holding a
+    /// [`ConfigError`]: [`FileNotFound`](ConfigError::FileNotFound) when the
+    /// file named by `path` or `MYAPP_CONFIG` does not exist,
+    /// [`Parse`](ConfigError::Parse) when the TOML does not parse (reporting
+    /// line and column, never the source line),
+    /// [`ApiKeySourceConflict`](ConfigError::ApiKeySourceConflict) when both
+    /// `api_key` and `api_key_file` are set in the file, or
+    /// [`InvalidEnvValue`](ConfigError::InvalidEnvValue) when a `MYAPP_*`
+    /// variable holds a value that does not parse. Returns
+    /// [`Error::Io`](crate::Error::Io) when a configuration or secret file
+    /// cannot be read.
     pub fn load(path: Option<&Path>, overrides: &ConfigOverrides) -> Result<Self> {
         Self::load_with_env(path, overrides, &SystemEnv)
     }
@@ -294,9 +299,7 @@ impl Config {
             return Ok(Some(read_secret_file(&p)?));
         }
         match (file_value, file_path) {
-            (Some(_), Some(_)) => Err(Error::Config(
-                "set either api_key or api_key_file, not both".to_string(),
-            )),
+            (Some(_), Some(_)) => Err(ConfigError::ApiKeySourceConflict.into()),
             (Some(v), None) => Ok(Some(SecretString::from(v))),
             (None, Some(p)) => Ok(Some(read_secret_file(&p)?)),
             (None, None) => Ok(None),
@@ -353,10 +356,12 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Config`] naming the path when the file named by `path`
-    /// or `MYAPP_CONFIG` does not exist, or when the TOML does not parse as `T`
-    /// (reporting line and column, never the source line). Returns
-    /// [`Error::Io`] when the file exists but cannot be read.
+    /// Returns [`Error::Config`](crate::Error::Config) naming the path, holding
+    /// [`ConfigError::FileNotFound`] when the file named by `path` or
+    /// `MYAPP_CONFIG` does not exist, or [`ConfigError::Parse`] when the TOML
+    /// does not parse as `T` (reporting line and column, never the source
+    /// line). Returns [`Error::Io`](crate::Error::Io) when the file exists but
+    /// cannot be read.
     pub fn read_config_file<T: DeserializeOwned + Default>(
         path: Option<&Path>,
         env: &impl Env,
@@ -373,13 +378,7 @@ fn parse_resolved_config<T: DeserializeOwned + Default>(
     let Some((path, text)) = read_resolved_config(resolved)? else {
         return Ok(T::default());
     };
-    toml::from_str(&text).map_err(|e| {
-        Error::Config(format!(
-            "invalid config file {}: {}",
-            path.display(),
-            describe_toml_error(&text, &e)
-        ))
-    })
+    toml::from_str(&text).map_err(|e| toml_parse_error(path, &text, &e).into())
 }
 
 /// Reads a resolved configuration file. A missing file is an error unless the
@@ -390,14 +389,14 @@ fn read_resolved_config(
     let Some((path, source)) = resolved else {
         return Ok(None);
     };
-    let named_by = match source {
+    let set_by_env = match source {
         ConfigPathSource::Default if !path.exists() => return Ok(None),
         ConfigPathSource::Default => {
             let text = std::fs::read_to_string(&path)?;
             return Ok(Some((path, text)));
         }
-        ConfigPathSource::Explicit => "",
-        ConfigPathSource::Env => " set by MYAPP_CONFIG",
+        ConfigPathSource::Explicit => false,
+        ConfigPathSource::Env => true,
     };
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok(Some((path, text))),
@@ -408,21 +407,20 @@ fn read_resolved_config(
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
             ) =>
         {
-            Err(Error::Config(format!(
-                "config file {}{named_by} does not exist",
-                path.display()
-            )))
+            Err(ConfigError::FileNotFound { path, set_by_env }.into())
         }
         Err(e) => Err(e.into()),
     }
 }
 
-/// Describes a TOML parse error as `line {line}, column {column}: {message}`.
+/// Builds the [`ConfigError::Parse`] for a TOML parse error in the file at
+/// `path`, whose message reads `line {line}, column {column}: {message}`.
 ///
 /// Uses [`toml::de::Error::message`] and [`toml::de::Error::span`] rather than
 /// `Display`, because `Display` quotes the offending source line, and a config
 /// line can hold a secret. Line and column are 1-based and computed over
-/// `text`; when the error has no span, only the message is returned.
+/// `text`; when the error has no span, both are zero and only the message is
+/// shown.
 ///
 /// The message itself still quotes the offending value for serde type and
 /// value errors (``invalid type: integer `123456`, expected a string``), so a
@@ -430,18 +428,38 @@ fn read_resolved_config(
 /// the first `"` or `` ` `` up to serde's final `, expected …` tail, or to the
 /// end when that tail does not read as schema text, is therefore masked as
 /// [`MASKED_VALUE`](crate::secret::MASKED_VALUE); see [`mask_quoted_values`].
-fn describe_toml_error(text: &str, error: &toml::de::Error) -> String {
+fn toml_parse_error(path: PathBuf, text: &str, error: &toml::de::Error) -> ConfigError {
     let message = mask_quoted_values(error.message());
-    let Some(span) = error.span() else {
-        return message;
-    };
-    let before = text.get(..span.start).unwrap_or(text);
-    // `split` yields one more piece than there are newlines, so the count is
-    // already the 1-based line number.
-    let line = before.split('\n').count();
-    let current_line = before.rsplit('\n').next().unwrap_or(before);
-    let column = current_line.chars().count().saturating_add(1);
-    format!("line {line}, column {column}: {message}")
+    let (line, column) = error.span().map_or((0, 0), |span| {
+        let before = text.get(..span.start).unwrap_or(text);
+        // `split` yields one more piece than there are newlines, so the count
+        // is already the 1-based line number.
+        let line = before.split('\n').count();
+        let current_line = before.rsplit('\n').next().unwrap_or(before);
+        (line, current_line.chars().count().saturating_add(1))
+    });
+    ConfigError::Parse {
+        path,
+        line,
+        column,
+        message,
+    }
+}
+
+/// The part of [`toml_parse_error`]'s message after the path:
+/// `line {line}, column {column}: {message}`, or the message alone without a
+/// span.
+#[cfg(test)]
+fn describe_toml_error(text: &str, error: &toml::de::Error) -> String {
+    match toml_parse_error(PathBuf::new(), text, error) {
+        ConfigError::Parse {
+            line,
+            column,
+            message,
+            ..
+        } => crate::error::Located::new(line, column, &message).to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Masks the user's value in a serde message as
@@ -550,6 +568,7 @@ fn read_secret_file(path: &str) -> Result<SecretString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
     use crate::env::MapEnv;
 
     /// Writes `contents` as `config.toml` in a new temp directory, returning
@@ -587,7 +606,10 @@ mod tests {
         let env = MapEnv::new();
         let err = Config::resolve_api_key(None, Some("a".into()), Some("/tmp/x".into()), &env)
             .unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
+        assert!(matches!(
+            err,
+            Error::Config(ConfigError::ApiKeySourceConflict)
+        ));
     }
 
     #[test]
@@ -729,7 +751,10 @@ mod tests {
             for raw in ["xyz", "-1", "1.5"] {
                 let env = MapEnv::new().with(var, raw);
                 let err = load(&path, &ConfigOverrides::default(), &env).unwrap_err();
-                assert!(matches!(err, Error::Config(_)), "{var}={raw}: {err:?}");
+                assert!(
+                    matches!(err, Error::Config(ConfigError::InvalidEnvValue { .. })),
+                    "{var}={raw}: {err:?}"
+                );
                 let message = err.to_string();
                 assert!(
                     message.contains(&format!("invalid {var} value {raw:?}")),
@@ -752,9 +777,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("typo.toml");
         let err = load(&missing, &ConfigOverrides::default(), &MapEnv::new()).unwrap_err();
-        let Error::Config(message) = err else {
-            panic!("expected Error::Config, got {err:?}");
+        let Error::Config(config @ ConfigError::FileNotFound { .. }) = err else {
+            panic!("expected ConfigError::FileNotFound, got {err:?}");
         };
+        let message = config.to_string();
         assert_eq!(
             message,
             format!("config file {} does not exist", missing.display())
@@ -767,9 +793,10 @@ mod tests {
         let missing = directory.path().join("typo.toml");
         let env = MapEnv::new().with("MYAPP_CONFIG", missing.to_string_lossy());
         let err = Config::load_with_env(None, &ConfigOverrides::default(), &env).unwrap_err();
-        let Error::Config(message) = err else {
-            panic!("expected Error::Config, got {err:?}");
+        let Error::Config(config @ ConfigError::FileNotFound { .. }) = err else {
+            panic!("expected ConfigError::FileNotFound, got {err:?}");
         };
+        let message = config.to_string();
         assert_eq!(
             message,
             format!(
@@ -784,9 +811,10 @@ mod tests {
         let (_directory, path) = config_file("");
         let missing = path.join("x.toml");
         let err = load(&missing, &ConfigOverrides::default(), &MapEnv::new()).unwrap_err();
-        let Error::Config(message) = err else {
-            panic!("expected Error::Config, got {err:?}");
+        let Error::Config(config @ ConfigError::FileNotFound { .. }) = err else {
+            panic!("expected ConfigError::FileNotFound, got {err:?}");
         };
+        let message = config.to_string();
         assert!(
             message.contains(&missing.display().to_string()),
             "{message}"
