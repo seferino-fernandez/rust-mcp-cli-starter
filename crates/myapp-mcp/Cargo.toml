@@ -8,6 +8,8 @@ homepage.workspace = true
 rust-version.workspace = true
 description = "Model Context Protocol server exposing the MYAPP API to LLM clients"
 readme = "README.md"
+keywords = ["mcp", "mcp-server", "llm", "ai", "api"]
+categories = ["api-bindings", "web-programming::http-server", "development-tools"]
 
 [[bin]]
 name = "myapp-mcp"

@@ -8,6 +8,11 @@ homepage.workspace = true
 rust-version.workspace = true
 description = "Async Rust client library for the MYAPP API"
 readme = "README.md"
+keywords = ["api", "client", "async", "http", "rest"]
+categories = ["api-bindings", "web-programming::http-client", "asynchronous"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 # Derive `schemars::JsonSchema` on the public API models so MCP/rmcp consumers

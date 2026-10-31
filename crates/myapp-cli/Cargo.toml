@@ -8,6 +8,8 @@ homepage.workspace = true
 rust-version.workspace = true
 description = "Terminal CLI for the MYAPP API"
 readme = "README.md"
+keywords = ["cli", "api", "client", "terminal"]
+categories = ["command-line-utilities", "api-bindings"]
 
 [[bin]]
 name = "myapp"
