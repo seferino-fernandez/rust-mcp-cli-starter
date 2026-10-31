@@ -193,12 +193,12 @@ Every call goes through the same checks, in order:
 
 Every result is `Json<Redacted<T>>`, built by `ApiClient::redact`, and the
 output schema stays `T`'s. It masks the credential forms listed in the
-[`myapp-core` README](../myapp-core/README.md#redaction) (sensitive keys and
-the values under them, secret pairs, query values and path segments, URL user
+[`myapp-core` README](../myapp-core/README.md#redaction) (string values
+under sensitive keys, secret pairs, query values and path segments, URL user
 information, `Authorization` and `Cookie` header values, JSON embedded in
 strings, object keys) and the configured API key itself. Redaction is
-pattern-based, so a secret in a shape it does not recognize reaches the
-model. A failing call answers a tool error holding only the core error's
+pattern-based and never changes a value's type, so a secret in a shape it
+does not recognize, or stored as a number, reaches the model. A failing call answers a tool error holding only the core error's
 public message (a 404 adds a hint to use the list tool), never the upstream
 body, the request URL, or decoder detail.
 
