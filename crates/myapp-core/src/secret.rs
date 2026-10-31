@@ -5,9 +5,12 @@
 use serde::Deserialize;
 use std::fmt;
 
+/// The single masked value that stands in for every secret in `Debug` output.
+pub const MASKED_VALUE: &str = "********";
+
 /// Holds a sensitive string such as an API key, bearer token, or PIN.
 ///
-/// The value is redacted in `Debug` output, so structs that derive `Debug` can
+/// The value is shown as [`MASKED_VALUE`] in `Debug` output, so structs that derive `Debug` can
 /// hold one without leaking it into logs. Read the underlying value explicitly
 /// with [`expose_secret`](SecretString::expose_secret).
 #[derive(Clone, Deserialize)]
@@ -35,7 +38,7 @@ impl From<&str> for SecretString {
 
 impl fmt::Debug for SecretString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SecretString([REDACTED])")
+        write!(f, "SecretString({MASKED_VALUE})")
     }
 }
 
@@ -48,7 +51,7 @@ mod tests {
         let secret = SecretString::from("super-secret-value");
         let rendered = format!("{secret:?}");
         assert!(!rendered.contains("super-secret-value"));
-        assert_eq!(rendered, "SecretString([REDACTED])");
+        assert_eq!(rendered, "SecretString(********)");
     }
 
     #[test]

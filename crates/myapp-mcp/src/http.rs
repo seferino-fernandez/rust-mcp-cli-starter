@@ -1,6 +1,8 @@
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::auth::AuthMode;
 use crate::config::{McpConfig, ServerConfig};
 use crate::middleware::cors::oauth_cors_layer;
 use crate::middleware::oauth::{OAuthMiddlewareState, oauth_bearer_auth};
@@ -8,12 +10,14 @@ use crate::middleware::static_bearer_auth::{StaticAuthToken, static_bearer_auth}
 use crate::oauth;
 use crate::oauth::model::OAuthEndpointState;
 use crate::oauth::store::{OAuthStore, OAuthStoreConfig};
+use crate::secret_digest::SecretDigest;
 use crate::shared::{create_api_client, resolve_base_url};
 use crate::tools::AppTools;
 use axum::{
     middleware::{self},
     routing::{get, post},
 };
+use myapp_core::SecretString;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
     tower::{StreamableHttpServerConfig, StreamableHttpService},
@@ -21,68 +25,124 @@ use rmcp::transport::streamable_http_server::{
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-/// Validates that the configured auth mode is safe for the bind address before
-/// the server starts, failing fast with an actionable message otherwise.
-///
-/// - `token`: a token must be present.
-/// - `none`: only allowed on a loopback address.
-/// - `oauth`: refuses a wildcard CORS origin (any site could drive the flow) and
-///   refuses plain HTTP on a non-loopback address (tokens/PKCE would traverse
-///   the network unencrypted) unless `oauth_allow_insecure_http` is set.
-fn validate_transport_security(
-    config: &ServerConfig,
-    addr: &std::net::SocketAddr,
-) -> anyhow::Result<()> {
-    match config.mcp.auth_mode.as_str() {
-        "token" => {
-            if config.mcp.token.is_none() {
-                anyhow::bail!(
-                    "auth_mode=\"token\" requires a token. Set MYAPP_MCP_TOKEN, \
-                     pass --token <value>, or add [mcp] token = \"...\" to config.toml"
-                );
+/// The HTTP transport's authentication, resolved from config with the data
+/// each mode needs.
+#[derive(Debug)]
+enum HttpAuth {
+    /// A static bearer token, known to be non-blank.
+    Token(SecretString),
+    /// OAuth 2.1 with PKCE.
+    OAuth(OAuthSettings),
+    /// No authentication; loopback only.
+    None,
+}
+
+/// What the OAuth routes need beyond the store, resolved once at startup.
+#[derive(Debug)]
+struct OAuthSettings {
+    /// The external base URL advertised in OAuth metadata.
+    base_url: String,
+    /// The PIN the consent screen requires, if any.
+    pin: Option<SecretString>,
+}
+
+impl HttpAuth {
+    /// Resolves the configured auth mode for the bind address, failing fast
+    /// with an actionable message when it is unsafe.
+    ///
+    /// - `token`: a non-empty, non-whitespace token must be present.
+    /// - `none`: only allowed on a loopback address.
+    /// - `oauth`: refuses a wildcard CORS origin (any site could drive the
+    ///   flow) and refuses plain HTTP on a non-loopback address (tokens/PKCE
+    ///   would traverse the network unencrypted) unless
+    ///   `oauth_allow_insecure_http` is set.
+    fn resolve(config: &ServerConfig, addr: &SocketAddr) -> anyhow::Result<Self> {
+        match config.mcp.auth_mode {
+            AuthMode::Token => {
+                let Some(token) = config
+                    .mcp
+                    .token
+                    .clone()
+                    .filter(|token| !token.expose_secret().trim().is_empty())
+                else {
+                    anyhow::bail!(
+                        "auth_mode=\"token\" requires a non-empty token. Pass --token <value>, \
+                         set MYAPP_MCP_TOKEN or MYAPP_MCP_TOKEN_FILE, or add [mcp] token = \
+                         \"...\" or token_file = \"...\" to config.toml"
+                    );
+                };
+                Ok(Self::Token(token))
+            }
+            AuthMode::None => {
+                if !addr.ip().is_loopback() {
+                    anyhow::bail!(
+                        "auth_mode=\"none\" is only allowed on loopback addresses. \
+                         Current bind address: {addr}"
+                    );
+                }
+                Ok(Self::None)
+            }
+            AuthMode::OAuth => {
+                if config
+                    .mcp
+                    .oauth_cors
+                    .origins
+                    .iter()
+                    .any(|origin| origin == "*")
+                {
+                    anyhow::bail!(
+                        "auth_mode=\"oauth\" refuses a wildcard CORS origin (\"*\"): it would let \
+                         any website drive the OAuth flow. Set [mcp.oauth_cors] origins to an \
+                         explicit allow-list."
+                    );
+                }
+                let base_url = resolve_base_url(config, addr);
+                let plaintext = !base_url.starts_with("https://");
+                if plaintext && !addr.ip().is_loopback() && !config.mcp.oauth_allow_insecure_http {
+                    anyhow::bail!(
+                        "auth_mode=\"oauth\" over plain HTTP on a non-loopback address ({addr}) \
+                         is refused: OAuth tokens and PKCE would traverse the network \
+                         unencrypted. Serve HTTPS (set [mcp] base_url to an https:// URL) or, on \
+                         a trusted private network, set [mcp] oauth_allow_insecure_http = true."
+                    );
+                }
+                Ok(Self::OAuth(OAuthSettings {
+                    base_url,
+                    pin: config.mcp.oauth_pin.clone(),
+                }))
             }
         }
-        "none" => {
-            if !addr.ip().is_loopback() {
-                anyhow::bail!(
-                    "auth_mode=\"none\" is only allowed on loopback addresses. \
-                     Current bind address: {addr}"
-                );
-            }
-        }
-        "oauth" => {
-            if config
-                .mcp
-                .oauth_cors
-                .origins
-                .iter()
-                .any(|origin| origin == "*")
-            {
-                anyhow::bail!(
-                    "auth_mode=\"oauth\" refuses a wildcard CORS origin (\"*\"): it would let any \
-                     website drive the OAuth flow. Set [mcp.oauth_cors] origins to an explicit \
-                     allow-list."
-                );
-            }
-            let base_url = resolve_base_url(config, addr);
-            let plaintext = !base_url.starts_with("https://");
-            if plaintext && !addr.ip().is_loopback() && !config.mcp.oauth_allow_insecure_http {
-                anyhow::bail!(
-                    "auth_mode=\"oauth\" over plain HTTP on a non-loopback address ({addr}) is \
-                     refused: OAuth tokens and PKCE would traverse the network unencrypted. Serve \
-                     HTTPS (set [mcp] base_url to an https:// URL) or, on a trusted private \
-                     network, set [mcp] oauth_allow_insecure_http = true."
-                );
-            }
-        }
-        other => anyhow::bail!("Unknown auth_mode: {other}. Use \"token\", \"oauth\", or \"none\""),
     }
-    Ok(())
+}
+
+/// Builds the socket address to bind from an IP address literal and a port.
+///
+/// Accepts IPv4 (`127.0.0.1`), bare IPv6 (`::1`), bracketed IPv6 (`[::1]`) and
+/// IPv6 with a numeric scope id (`fe80::1%2` or `[fe80::1%2]`). Hostnames such
+/// as `localhost` are refused rather than resolved, so the bind address is
+/// exactly what the config says.
+fn listen_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
+    let host = host.trim();
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    // A bare IPv6 literal with a scope id needs brackets to carry a port.
+    let authority = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    authority.parse().map_err(|source| {
+        anyhow::anyhow!(
+            "mcp host {host:?} must be an IPv4 or IPv6 address literal such as 127.0.0.1, ::1, \
+             [::1] or fe80::1%2 (scope ids are numeric); hostnames are not resolved ({source})"
+        )
+    })
 }
 
 pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
-    let addr: std::net::SocketAddr = format!("{}:{}", config.mcp.host, config.mcp.port).parse()?;
-    validate_transport_security(config, &addr)?;
+    let addr = listen_addr(&config.mcp.host, config.mcp.port)?;
+    let auth = HttpAuth::resolve(config, &addr)?;
 
     let api_client = create_api_client(config)?;
     let max_response_bytes = config.mcp.max_response_bytes;
@@ -105,27 +165,18 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     );
 
     tracing::debug!(auth_mode = %config.mcp.auth_mode, "Building router");
-    let router = match config.mcp.auth_mode.as_str() {
-        "token" => {
+    let router = match auth {
+        HttpAuth::Token(token) => {
             tracing::info!("Using static bearer token authentication");
-            // Presence was validated above; treat an absent token as empty
-            // rather than panicking, to satisfy the no-unwrap lint wall.
-            let token = config
-                .mcp
-                .token
-                .as_ref()
-                .map(|secret| secret.expose_secret().to_string())
-                .unwrap_or_default();
             axum::Router::new()
                 .nest_service("/mcp", service)
                 .layer(middleware::from_fn_with_state(
-                    StaticAuthToken(token),
+                    StaticAuthToken(SecretDigest::new(token.expose_secret())),
                     static_bearer_auth,
                 ))
         }
-        "oauth" => {
+        HttpAuth::OAuth(OAuthSettings { base_url, pin }) => {
             tracing::info!("Using OAuth 2.1 authentication with PKCE");
-            let base_url = resolve_base_url(config, &addr);
             let store_config = OAuthStoreConfig::from_mcp_config(&config.mcp);
             let sweep_interval = Duration::from_secs(config.mcp.oauth_sweep_interval_secs);
             let store = OAuthStore::new(store_config);
@@ -137,11 +188,7 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
             let endpoint_state = Arc::new(OAuthEndpointState {
                 store: store.clone(),
                 base_url: base_url.clone(),
-                oauth_pin: config
-                    .mcp
-                    .oauth_pin
-                    .as_ref()
-                    .map(|secret| secret.expose_secret().to_string()),
+                oauth_pin: pin.map(|secret| secret.expose_secret().to_string()),
             });
 
             let middleware_state = OAuthMiddlewareState {
@@ -195,13 +242,10 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
 
             oauth_routes.merge(mcp_routes)
         }
-        "none" => {
+        HttpAuth::None => {
             tracing::warn!("Running with auth_mode=none: no authentication on MCP endpoints");
             axum::Router::new().nest_service("/mcp", service)
         }
-        // Unreachable: auth_mode was validated above; kept as a defensive guard.
-        // The two matches must stay in sync if you add or rename an auth mode.
-        other => anyhow::bail!("Unknown auth_mode: {other}. Use \"token\", \"oauth\", or \"none\""),
     };
 
     if !addr.ip().is_loopback() {
@@ -367,7 +411,7 @@ mod tests {
         allow_insecure: bool,
     ) -> ServerConfig {
         let mut config = ServerConfig::default();
-        config.mcp.auth_mode = "oauth".to_string();
+        config.mcp.auth_mode = AuthMode::OAuth;
         config.mcp.oauth_cors = OAuthCorsConfig {
             origins: origins.into_iter().map(str::to_string).collect(),
         };
@@ -376,14 +420,18 @@ mod tests {
         config
     }
 
-    fn non_loopback() -> std::net::SocketAddr {
-        std::net::SocketAddr::from(([203, 0, 113, 1], 8080))
+    fn non_loopback() -> SocketAddr {
+        SocketAddr::from(([203, 0, 113, 1], 8080))
+    }
+
+    fn loopback() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 8080))
     }
 
     #[test]
     fn oauth_refuses_wildcard_cors_origin() {
         let config = oauth_config(vec!["*"], Some("https://mcp.example.com"), false);
-        let err = validate_transport_security(&config, &non_loopback())
+        let err = HttpAuth::resolve(&config, &non_loopback())
             .expect_err("wildcard CORS under oauth must be refused");
         assert!(err.to_string().contains("wildcard"), "got: {err}");
     }
@@ -395,7 +443,7 @@ mod tests {
             Some("http://mcp.example.com"),
             false,
         );
-        let err = validate_transport_security(&config, &non_loopback())
+        let err = HttpAuth::resolve(&config, &non_loopback())
             .expect_err("plaintext oauth off-loopback must be refused");
         assert!(err.to_string().contains("plain HTTP"), "got: {err}");
     }
@@ -407,27 +455,127 @@ mod tests {
             Some("http://mcp.example.com"),
             true,
         );
-        validate_transport_security(&config, &non_loopback())
+        HttpAuth::resolve(&config, &non_loopback())
             .expect("override permits plaintext oauth off-loopback");
+    }
+
+    #[test]
+    fn oauth_carries_the_base_url_and_pin() {
+        let mut config = oauth_config(
+            vec!["https://app.example.com"],
+            Some("https://mcp.example.com"),
+            false,
+        );
+        config.mcp.oauth_pin = Some(SecretString::from("pin"));
+        let HttpAuth::OAuth(settings) = HttpAuth::resolve(&config, &non_loopback()).unwrap() else {
+            panic!("auth_mode=oauth must resolve to HttpAuth::OAuth");
+        };
+        assert_eq!(settings.base_url, "https://mcp.example.com");
+        assert_eq!(
+            settings.pin.as_ref().map(SecretString::expose_secret),
+            Some("pin")
+        );
     }
 
     #[test]
     fn none_mode_refuses_non_loopback() {
         let mut config = ServerConfig::default();
-        config.mcp.auth_mode = "none".to_string();
-        let err = validate_transport_security(&config, &non_loopback())
+        config.mcp.auth_mode = AuthMode::None;
+        let err = HttpAuth::resolve(&config, &non_loopback())
             .expect_err("auth_mode=none off-loopback must be refused");
         assert!(err.to_string().contains("loopback"), "got: {err}");
+        assert!(matches!(
+            HttpAuth::resolve(&config, &loopback()),
+            Ok(HttpAuth::None)
+        ));
     }
 
     #[test]
     fn token_mode_requires_token() {
         let mut config = ServerConfig::default();
-        config.mcp.auth_mode = "token".to_string();
+        config.mcp.auth_mode = AuthMode::Token;
         config.mcp.token = None;
-        let err = validate_transport_security(&config, &non_loopback())
+        let err = HttpAuth::resolve(&config, &non_loopback())
             .expect_err("auth_mode=token without a token must be refused");
         assert!(err.to_string().contains("token"), "got: {err}");
+    }
+
+    /// An empty or whitespace-only token is refused on any bind, and the error
+    /// names every way to set one.
+    #[test]
+    fn token_mode_refuses_empty_or_whitespace_token() {
+        for blank in ["", " ", "\t\n "] {
+            let mut config = ServerConfig::default();
+            config.mcp.token = Some(SecretString::from(blank));
+            let message = HttpAuth::resolve(&config, &loopback())
+                .expect_err("a blank token must be refused")
+                .to_string();
+            for source in [
+                "--token",
+                "MYAPP_MCP_TOKEN",
+                "MYAPP_MCP_TOKEN_FILE",
+                "[mcp] token",
+                "token_file",
+            ] {
+                assert!(message.contains(source), "{blank:?}: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn token_mode_carries_the_token() {
+        let mut config = ServerConfig::default();
+        config.mcp.token = Some(SecretString::from("s3cret"));
+        let HttpAuth::Token(token) = HttpAuth::resolve(&config, &non_loopback()).unwrap() else {
+            panic!("auth_mode=token must resolve to HttpAuth::Token");
+        };
+        assert_eq!(token.expose_secret(), "s3cret");
+    }
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn listen_addr_keeps_ipv4_host() {
+        assert_eq!(
+            listen_addr("127.0.0.1", 8080).unwrap(),
+            addr("127.0.0.1:8080")
+        );
+    }
+
+    #[test]
+    fn listen_addr_brackets_bare_ipv6_host() {
+        assert_eq!(listen_addr("::1", 8080).unwrap(), addr("[::1]:8080"));
+    }
+
+    #[test]
+    fn listen_addr_accepts_bracketed_ipv6_host() {
+        assert_eq!(listen_addr("[::1]", 8080).unwrap(), addr("[::1]:8080"));
+    }
+
+    #[test]
+    fn listen_addr_keeps_ipv6_scope_id_bare_or_bracketed() {
+        for host in ["fe80::1%2", "[fe80::1%2]"] {
+            let SocketAddr::V6(v6) = listen_addr(host, 8080).unwrap() else {
+                panic!("{host}: expected an IPv6 address");
+            };
+            assert_eq!(v6.ip(), &"fe80::1".parse::<std::net::Ipv6Addr>().unwrap());
+            assert_eq!(v6.scope_id(), 2, "{host}");
+            assert_eq!(v6.port(), 8080, "{host}");
+        }
+    }
+
+    #[test]
+    fn listen_addr_rejects_hostnames_and_named_scope_ids() {
+        for host in ["localhost", "mcp.example.com", "fe80::1%eth0"] {
+            let message = listen_addr(host, 8080).unwrap_err().to_string();
+            assert!(message.contains(&format!("{host:?}")), "{message}");
+            assert!(
+                message.contains("127.0.0.1, ::1, [::1] or fe80::1%2"),
+                "{message}"
+            );
+        }
     }
 }
 

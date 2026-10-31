@@ -10,11 +10,13 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+mod auth;
 mod commands;
 mod config;
 mod http;
 mod middleware;
 mod oauth;
+mod secret_digest;
 mod shared;
 mod stdio;
 mod tools;
@@ -24,10 +26,15 @@ use std::io::stderr;
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use shared::{Args, Command};
+use tracing::level_filters::LevelFilter;
 
+use crate::auth::Transport;
 use crate::commands::{completions, man};
 
 use crate::config::ServerConfig;
+
+/// Applies when neither `-v`/`-q`, `MYAPP_LOG_LEVEL` nor `[log] level` sets one.
+const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::INFO;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -49,15 +56,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut config = ServerConfig::load(args.config.as_deref())?;
+    let config = ServerConfig::load(args.config.as_deref(), &args.overrides(), args.transport)?;
 
-    // Default level precedence: explicit `-v`/`-q` overrides config `log.level`;
-    // `RUST_LOG` (via `try_from_default_env`) still overrides everything.
-    let level = if args.verbosity.is_present() {
-        args.verbosity.tracing_level_filter().to_string()
-    } else {
-        config.core.log.level.clone()
-    };
+    // Default level precedence: explicit `-v`/`-q` overrides config `log.level`,
+    // which overrides `info`; `RUST_LOG` (via `try_from_default_env`) still
+    // overrides everything.
+    let flag = args
+        .verbosity
+        .is_present()
+        .then(|| args.verbosity.tracing_level_filter());
+    let (level, warning) = config.core.log.resolve_level(flag, DEFAULT_LOG_LEVEL);
+    if let Some(warning) = warning {
+        eprintln!("myapp-mcp: warning: {warning}");
+    }
     tracing_subscriber::fmt()
         .with_writer(stderr)
         .with_env_filter(
@@ -69,8 +80,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    shared::apply_cli_overrides(&mut config, &args);
-
     tracing::info!(
         transport = %args.transport,
         auth_mode = %config.mcp.auth_mode,
@@ -79,10 +88,9 @@ async fn main() -> anyhow::Result<()> {
         "myapp-mcp starting"
     );
 
-    match args.transport.as_str() {
-        "stdio" => stdio::serve(&config).await?,
-        "http" => http::serve(&config).await?,
-        other => anyhow::bail!("Unknown transport: {other}"),
+    match args.transport {
+        Transport::Stdio => stdio::serve(&config).await?,
+        Transport::Http => http::serve(&config).await?,
     }
 
     Ok(())

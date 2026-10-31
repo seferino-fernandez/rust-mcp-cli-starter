@@ -1,19 +1,21 @@
 use anyhow::Context;
-use myapp_core::{ApiClient, Config, SecretString};
+use myapp_core::{ApiClient, Config, ConfigOverrides, SecretString};
 use std::path::Path;
 
-/// Builds an [`ApiClient`] from config + CLI overrides.
-pub fn build_client(
+/// Loads config with the CLI flags as the top layer, above env and TOML.
+pub fn load_config(
     config_path: Option<&Path>,
     base_url: Option<&str>,
     api_key: Option<&str>,
-) -> anyhow::Result<ApiClient> {
-    let mut config = Config::load(config_path).context("loading config")?;
-    if let Some(url) = base_url {
-        config.base_url = url.to_string();
-    }
-    if let Some(key) = api_key {
-        config.api_key = Some(SecretString::from(key.to_string()));
-    }
+) -> anyhow::Result<Config> {
+    let overrides = ConfigOverrides {
+        base_url: base_url.map(str::to_string),
+        api_key: api_key.map(SecretString::from),
+    };
+    Config::load(config_path, &overrides).context("loading config")
+}
+
+/// Builds an [`ApiClient`] from loaded config.
+pub fn build_client(config: Config) -> anyhow::Result<ApiClient> {
     ApiClient::new(config).context("building API client")
 }

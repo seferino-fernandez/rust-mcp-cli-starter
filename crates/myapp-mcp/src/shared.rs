@@ -1,9 +1,11 @@
 use clap::{Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 
+use crate::auth::{AuthMode, Transport};
 use crate::commands::completions::CompletionShell;
 
-use crate::config::ServerConfig;
+use crate::config::{ServerConfig, ServerOverrides};
+use myapp_core::{ConfigOverrides, SecretString};
 
 /// CLI arguments for the MCP server.
 #[derive(Parser)]
@@ -17,17 +19,19 @@ pub struct Args {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Path to config.toml.
+    /// Path to config.toml [env: MYAPP_CONFIG]. A path named here or by
+    /// MYAPP_CONFIG must exist.
     #[arg(long, value_name = "PATH")]
     pub config: Option<std::path::PathBuf>,
 
-    /// Transport: "stdio" or "http".
-    #[arg(long, default_value = "stdio", value_parser = ["stdio", "http"])]
-    pub transport: String,
+    /// Transport to serve the MCP protocol over.
+    #[arg(long, value_enum, default_value_t = Transport::Stdio)]
+    pub transport: Transport,
 
-    /// Logging verbosity. Default reports only errors; `-v` warn, `-vv` info,
-    /// `-vvv` debug, `-vvvv` trace; `-q` silences output. When passed, overrides
-    /// the configured `log.level`; `RUST_LOG` still overrides everything.
+    /// Logging verbosity: `-v` warn, `-vv` info, `-vvv` debug, `-vvvv` trace;
+    /// `-q` silences output. When passed, overrides `MYAPP_LOG_LEVEL` and
+    /// `[log] level`; with none of them set, the default is info. `RUST_LOG`
+    /// still overrides everything.
     #[command(flatten)]
     pub verbosity: Verbosity,
 
@@ -39,7 +43,8 @@ pub struct Args {
     #[arg(long)]
     pub api_key: Option<String>,
 
-    /// Bind host for HTTP transport.
+    /// Bind host for HTTP transport: an IP address literal such as 127.0.0.1,
+    /// ::1 or [::1].
     #[arg(long)]
     pub host: Option<String>,
 
@@ -47,7 +52,8 @@ pub struct Args {
     #[arg(long)]
     pub port: Option<u16>,
 
-    /// Static bearer token for auth_mode=token [env: MYAPP_MCP_TOKEN].
+    /// Static bearer token for auth_mode=token; an empty or whitespace-only
+    /// token is refused at startup [env: MYAPP_MCP_TOKEN].
     #[arg(long)]
     pub token: Option<String>,
 
@@ -55,9 +61,9 @@ pub struct Args {
     #[arg(long)]
     pub mcp_base_url: Option<String>,
 
-    /// Auth mode: "token", "oauth", or "none".
-    #[arg(long, value_parser = ["token", "oauth", "none"])]
-    pub auth_mode: Option<String>,
+    /// Auth mode for the HTTP transport [env: MYAPP_MCP_AUTH_MODE].
+    #[arg(long, value_enum)]
+    pub auth_mode: Option<AuthMode>,
 
     /// PIN required on the OAuth consent screen [env: MYAPP_MCP_OAUTH_PIN].
     #[arg(long)]
@@ -80,31 +86,22 @@ pub enum Command {
     },
 }
 
-/// Applies CLI overrides onto a loaded [`ServerConfig`](crate::config::ServerConfig).
-pub fn apply_cli_overrides(config: &mut crate::config::ServerConfig, args: &Args) {
-    if let Some(url) = &args.base_url {
-        config.core.base_url = url.clone();
-    }
-    if let Some(key) = &args.api_key {
-        config.core.api_key = Some(myapp_core::SecretString::from(key.clone()));
-    }
-    if let Some(host) = &args.host {
-        config.mcp.host.clone_from(host);
-    }
-    if let Some(port) = args.port {
-        config.mcp.port = port;
-    }
-    if let Some(token) = &args.token {
-        config.mcp.token = Some(myapp_core::SecretString::from(token.clone()));
-    }
-    if let Some(url) = &args.mcp_base_url {
-        config.mcp.base_url = Some(url.clone());
-    }
-    if let Some(mode) = &args.auth_mode {
-        config.mcp.auth_mode.clone_from(mode);
-    }
-    if let Some(pin) = &args.oauth_pin {
-        config.mcp.oauth_pin = Some(myapp_core::SecretString::from(pin.clone()));
+impl Args {
+    /// Returns the CLI flags as the loader's top layer.
+    pub fn overrides(&self) -> ServerOverrides {
+        let secret = |value: &Option<String>| value.clone().map(SecretString::from);
+        ServerOverrides {
+            core: ConfigOverrides {
+                base_url: self.base_url.clone(),
+                api_key: secret(&self.api_key),
+            },
+            host: self.host.clone(),
+            port: self.port,
+            token: secret(&self.token),
+            base_url: self.mcp_base_url.clone(),
+            auth_mode: self.auth_mode,
+            oauth_pin: secret(&self.oauth_pin),
+        }
     }
 }
 
@@ -125,4 +122,22 @@ pub fn resolve_base_url(config: &ServerConfig, addr: &std::net::SocketAddr) -> S
 /// Builds an authenticated [`ApiClient`] from config (eager; no login flow).
 pub fn create_api_client(config: &ServerConfig) -> anyhow::Result<myapp_core::ApiClient> {
     Ok(myapp_core::ApiClient::new(config.core.clone())?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_defaults_to_stdio_and_rejects_unknown_names() {
+        let args = Args::try_parse_from(["myapp-mcp"]).unwrap();
+        assert_eq!(args.transport, Transport::Stdio);
+        let args = Args::try_parse_from(["myapp-mcp", "--transport", "http"]).unwrap();
+        assert_eq!(args.transport, Transport::Http);
+        let parsed = Args::try_parse_from(["myapp-mcp", "--transport", "sse"]);
+        assert_eq!(
+            parsed.err().map(|err| err.kind()),
+            Some(clap::error::ErrorKind::InvalidValue)
+        );
+    }
 }

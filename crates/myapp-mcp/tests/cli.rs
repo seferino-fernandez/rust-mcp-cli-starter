@@ -55,3 +55,65 @@ fn dynamic_completion_registration() {
         .success()
         .stdout(contains("COMPLETE"));
 }
+
+#[test]
+fn missing_explicit_config_file_is_an_error() {
+    let missing = std::env::temp_dir().join(format!(
+        "myapp-mcp-missing-config-{}/config.toml",
+        std::process::id()
+    ));
+    Command::cargo_bin("myapp-mcp")
+        .unwrap()
+        .env_clear()
+        .arg("--config")
+        .arg(&missing)
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(contains(format!(
+            "config file {} does not exist",
+            missing.display()
+        )));
+}
+
+#[test]
+fn missing_env_config_file_is_an_error_naming_the_variable() {
+    Command::cargo_bin("myapp-mcp")
+        .unwrap()
+        .env_clear()
+        .env("MYAPP_CONFIG", "/nonexistent/myapp/config.toml")
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(contains(
+            "config file /nonexistent/myapp/config.toml set by MYAPP_CONFIG does not exist",
+        ));
+}
+
+#[test]
+fn kebab_cased_auth_mode_is_rejected() {
+    Command::cargo_bin("myapp-mcp")
+        .unwrap()
+        .args(["--auth-mode", "o-auth"])
+        .assert()
+        .failure()
+        .stderr(contains("invalid value 'o-auth'"));
+}
+
+#[test]
+fn http_refuses_a_whitespace_token_at_startup() {
+    let config =
+        std::env::temp_dir().join(format!("myapp-mcp-blank-token-{}.toml", std::process::id()));
+    std::fs::write(&config, "").unwrap();
+    let assert = Command::cargo_bin("myapp-mcp")
+        .unwrap()
+        .env_clear()
+        .arg("--config")
+        .arg(&config)
+        .args(["--transport", "http", "--port", "0", "--token", "   "])
+        .assert();
+    std::fs::remove_file(&config).unwrap();
+    assert
+        .failure()
+        .stderr(contains("requires a non-empty token").and(contains("MYAPP_MCP_TOKEN_FILE")));
+}

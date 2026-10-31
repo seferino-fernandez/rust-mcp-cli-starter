@@ -26,7 +26,7 @@ pub mod pagination;
 pub mod secret;
 
 pub use client::ApiClient;
-pub use config::Config;
+pub use config::{Config, ConfigOverrides, ConfigPathSource};
 pub use error::Error;
 pub use secret::SecretString;
 
