@@ -369,6 +369,15 @@ pub enum ConfigError {
         reason: String,
     },
 
+    /// The API key that won is empty or only whitespace. Such a key could
+    /// never authenticate, and scrubbing it from output would mask every
+    /// gap between words.
+    #[error(
+        "API key is empty or whitespace-only; set a real key in MYAPP_API_KEY, \
+         MYAPP_API_KEY_FILE, --api-key, or api_key or api_key_file in config.toml"
+    )]
+    BlankApiKey,
+
     /// The API key holds bytes that cannot be sent in an HTTP header.
     #[error("API key contains invalid header characters")]
     InvalidApiKeyHeader,

@@ -69,8 +69,14 @@ impl ApiClient {
     }
 
     /// Redacts `data` for presentation, as [`Redacted::new`] does, and also
-    /// masks every exact representation of the secrets this client holds,
-    /// before and after the key-based and free-text rules.
+    /// masks every exact representation of the secrets this client holds, in
+    /// values and object keys, before and after the key-based and free-text
+    /// rules.
+    ///
+    /// The API key is masked wherever it appears, so a very short key, such
+    /// as one character, also masks every occurrence of that text in
+    /// unrelated output. An empty or whitespace-only key is refused when the
+    /// configuration loads.
     ///
     /// # Errors
     ///
@@ -276,6 +282,32 @@ mod tests {
         assert_eq!(error.public_message(), "the upstream request failed");
         let text = format!("{}{error:?}", chain_text(&error));
         assert!(!text.contains("client-secret-key"), "{text}");
+    }
+
+    #[test]
+    fn redact_masks_the_api_key_in_values_and_map_keys() {
+        let client = ApiClient::new(Config {
+            api_key: Some(SecretString::from("client-secret-key")),
+            ..Config::default()
+        })
+        .expect("client builds");
+        let data = std::collections::BTreeMap::from([
+            (
+                "client-secret-key".to_string(),
+                "uses client-secret-key".to_string(),
+            ),
+            ("https://u:pw@h".to_string(), "x".to_string()),
+        ]);
+
+        let redacted = client.redact(&data).expect("redaction succeeds");
+
+        assert_eq!(
+            redacted.as_value(),
+            &serde_json::json!({
+                "********": "uses ********",
+                "https://u:********@h": "x"
+            })
+        );
     }
 
     #[test]

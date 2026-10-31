@@ -205,7 +205,9 @@ impl Config {
     /// [`Parse`](ConfigError::Parse) when the TOML does not parse (reporting
     /// line and column, never the source line),
     /// [`ApiKeySourceConflict`](ConfigError::ApiKeySourceConflict) when both
-    /// `api_key` and `api_key_file` are set in the file, or
+    /// `api_key` and `api_key_file` are set in the file,
+    /// [`BlankApiKey`](ConfigError::BlankApiKey) when the API key that wins
+    /// is empty or only whitespace, or
     /// [`InvalidEnvValue`](ConfigError::InvalidEnvValue) when a `MYAPP_*`
     /// variable holds a value that does not parse. Returns
     /// [`Error::Io`](crate::Error::Io) when a configuration or secret file
@@ -256,6 +258,13 @@ impl Config {
             file.api_key_file,
             env,
         )?;
+        if config
+            .api_key
+            .as_ref()
+            .is_some_and(|key| key.expose_secret().trim().is_empty())
+        {
+            return Err(ConfigError::BlankApiKey.into());
+        }
 
         // Env overrides (highest precedence below CLI).
         if let Some(v) = env_non_empty(env, "MYAPP_BASE_URL") {
@@ -282,7 +291,8 @@ impl Config {
     /// Resolves the API key from the highest layer that supplies one:
     /// override → `MYAPP_API_KEY` env → `MYAPP_API_KEY_FILE` env → `api_key` or
     /// `api_key_file` (toml). A `Some` override wins verbatim, even when empty,
-    /// and no lower layer is read.
+    /// and no lower layer is read; the caller then rejects an empty or
+    /// whitespace-only key.
     fn resolve_api_key(
         override_value: Option<SecretString>,
         file_value: Option<String>,
@@ -693,15 +703,55 @@ mod tests {
     }
 
     #[test]
-    fn empty_api_key_override_wins_verbatim() {
-        let (_directory, path) = config_file("api_key = \"from-toml\"\n");
-        let env = MapEnv::new().with("MYAPP_API_KEY", "from-env");
-        let overrides = ConfigOverrides {
-            api_key: Some(SecretString::from("")),
-            ..ConfigOverrides::default()
-        };
-        let config = load(&path, &overrides, &env).unwrap();
-        assert_eq!(config.api_key.unwrap().expose_secret(), "");
+    fn empty_api_key_override_wins_and_is_rejected() {
+        // The empty override still wins: no lower layer is read, not even the
+        // missing MYAPP_API_KEY_FILE, and the blank key is then refused rather
+        // than replaced by the env or TOML key.
+        let (directory, path) = config_file("api_key = \"from-toml\"\n");
+        let env = MapEnv::new()
+            .with("MYAPP_API_KEY", "from-env")
+            .with("MYAPP_API_KEY_FILE", missing_secret(&directory));
+        for blank in ["", " ", "\t\n"] {
+            let overrides = ConfigOverrides {
+                api_key: Some(SecretString::from(blank)),
+                ..ConfigOverrides::default()
+            };
+            let err = load(&path, &overrides, &env).unwrap_err();
+            assert!(
+                matches!(err, Error::Config(ConfigError::BlankApiKey)),
+                "{blank:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn whitespace_api_key_from_env_toml_or_file_is_rejected_naming_the_sources() {
+        let (directory, secret_path) = config_file(" \n");
+        for (toml, env) in [
+            (String::new(), MapEnv::new().with("MYAPP_API_KEY", "  ")),
+            ("api_key = \" \"\n".to_string(), MapEnv::new()),
+            (
+                format!("api_key_file = {:?}\n", secret_path.display().to_string()),
+                MapEnv::new(),
+            ),
+        ] {
+            let path = directory.path().join("main.toml");
+            std::fs::write(&path, &toml).unwrap();
+            let err = load(&path, &ConfigOverrides::default(), &env).unwrap_err();
+            let message = err.to_string();
+            assert!(
+                matches!(err, Error::Config(ConfigError::BlankApiKey)),
+                "{toml}: {err:?}"
+            );
+            for source in [
+                "MYAPP_API_KEY",
+                "MYAPP_API_KEY_FILE",
+                "--api-key",
+                "api_key",
+            ] {
+                assert!(message.contains(source), "{message}");
+            }
+        }
     }
 
     #[test]
