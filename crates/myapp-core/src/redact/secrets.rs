@@ -4,9 +4,12 @@
 use std::borrow::Cow;
 
 use super::MASKED_VALUE;
+use super::json::rename_keys;
 use crate::SecretString;
 
-/// Scrubs `secrets` from every string in `value`, preparing them once.
+/// Scrubs `secrets` from every string and object key in `value`, preparing
+/// them once. Keys that collide once scrubbed are all kept, as
+/// [`rename_keys`] describes.
 pub(crate) fn scrub_json_secrets(value: &mut serde_json::Value, secrets: &[SecretString]) {
     PreparedSecrets::new(secrets).scrub_json(value);
 }
@@ -32,14 +35,17 @@ struct PreparedSecret<'secret> {
 }
 
 impl<'secret> PreparedSecrets<'secret> {
-    /// Prepares the non-empty `secrets`; an empty secret matches everywhere
-    /// and so is never a value to scrub.
+    /// Prepares the `secrets` that hold more than whitespace: an empty or
+    /// whitespace-only secret would mask every gap between words, so it is
+    /// never a value to scrub. A very short secret, such as one character,
+    /// is still scrubbed wherever it appears, which can mangle unrelated
+    /// output.
     fn new(secrets: &'secret [SecretString]) -> Self {
         Self(
             secrets
                 .iter()
                 .map(SecretString::expose_secret)
-                .filter(|raw| !raw.is_empty())
+                .filter(|raw| !raw.trim().is_empty())
                 .map(|raw| PreparedSecret {
                     raw,
                     escaped: json_escaped(raw),
@@ -71,6 +77,10 @@ impl<'secret> PreparedSecrets<'secret> {
                 for value in object.values_mut() {
                     self.scrub_json(value);
                 }
+                rename_keys(object, |key| match self.scrub(key) {
+                    Cow::Borrowed(_) => None,
+                    Cow::Owned(scrubbed) => Some(scrubbed),
+                });
             }
             _ => {}
         }
@@ -159,12 +169,28 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_secret_scrubs_nothing() {
-        let secrets = [SecretString::from("")];
-        assert_eq!(scrub_secret_representations("text", &secrets), "text");
-        let mut value = serde_json::json!({"a": "text"});
+    fn an_empty_or_whitespace_secret_scrubs_nothing() {
+        for secret in ["", " ", "\t\n "] {
+            let secrets = [SecretString::from(secret)];
+            assert_eq!(
+                scrub_secret_representations("some text\there", &secrets),
+                "some text\there"
+            );
+            let mut value = serde_json::json!({"a b": "some text"});
+            scrub_json_secrets(&mut value, &secrets);
+            assert_eq!(value, serde_json::json!({"a b": "some text"}));
+        }
+    }
+
+    #[test]
+    fn object_keys_are_scrubbed() {
+        let secrets = [SecretString::from("k3y")];
+        let mut value = serde_json::json!({"k3y": 1, "x-k3y-y": {"k3y": "k3y"}});
         scrub_json_secrets(&mut value, &secrets);
-        assert_eq!(value, serde_json::json!({"a": "text"}));
+        assert_eq!(
+            value,
+            serde_json::json!({"********": 1, "x-********-y": {"********": "********"}})
+        );
     }
 
     #[test]

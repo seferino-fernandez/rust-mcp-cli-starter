@@ -11,15 +11,19 @@ use super::url::{
     contains_http_scheme_marker, find_http_url_end, find_http_url_start, matching_delimiter,
     redact_url_user_info,
 };
-use super::{MASKED_VALUE, is_sensitive_free_text_key, starts_with_ignore_ascii_case};
+use super::{
+    MASKED_VALUE, is_sensitive_free_text_key, percent_decoded, percent_escape_at,
+    starts_with_ignore_ascii_case,
+};
 
 /// Masks credentials in free text, borrowing `text` when nothing is masked.
 ///
-/// Text that holds no `@` and, ignoring `-`, `_` and ASCII case, none of
-/// `key`, `pass`, `secret`, `token` or `authorization` is returned at once:
-/// every sensitive key and `Authorization` header name holds one of those
-/// words, and URL user information needs an `@`, so no rule can mask it.
-/// Other text goes through [`mask_free_text`].
+/// Text that holds no `@` or `%` and, ignoring `-`, `_` and ASCII case, none
+/// of `key`, `pass`, `secret`, `token`, `authorization`, `credential` or
+/// `cookie` is returned at once: every sensitive key and header name holds
+/// one of those words, a percent-encoded key needs a `%`, and user
+/// information needs an `@`, so no rule can mask it. Other text goes through
+/// [`mask_free_text`].
 pub(super) fn redact_free_text(text: &str) -> Cow<'_, str> {
     if may_hold_credentials(text) {
         mask_free_text(text)
@@ -30,18 +34,20 @@ pub(super) fn redact_free_text(text: &str) -> Cow<'_, str> {
 
 /// Whether some free-text rule may mask part of `text`.
 fn may_hold_credentials(text: &str) -> bool {
-    text.contains('@') || contains_key_word(text)
+    text.contains(['@', '%']) || contains_key_word(text)
 }
 
-/// The words, in lower case, one of which every sensitive key and
-/// `Authorization` header name holds once `-` and `_` are removed, each
-/// packed by [`pack_key_word`].
-const KEY_WORDS: [(u128, u128); 5] = [
+/// The words, in lower case, one of which every sensitive key and header
+/// name holds once `-` and `_` are removed, each packed by
+/// [`pack_key_word`].
+const KEY_WORDS: [(u128, u128); 7] = [
     pack_key_word(b"key"),
     pack_key_word(b"pass"),
     pack_key_word(b"secret"),
     pack_key_word(b"token"),
     pack_key_word(b"authorization"),
+    pack_key_word(b"credential"),
+    pack_key_word(b"cookie"),
 ];
 
 /// Packs up to 16 bytes into the low bytes of a `u128`, last byte lowest,
@@ -84,7 +90,9 @@ pub(super) const fn is_part_separator(byte: u8) -> bool {
 
 /// Masks credentials in free text, without the shortcut of [`redact_free_text`].
 ///
-/// http(s) URLs are found first and their user information is masked. The
+/// http(s) URLs are found first and their user information is masked; the
+/// user information after any other `//` is masked by
+/// [`mask_authority_user_info`]. The
 /// other rules then mark byte ranges of that text as values to mask: the
 /// per-token rules look at one whitespace-separated token at a time, with
 /// each http(s) URL as a token of its own, and again together with the text
@@ -128,7 +136,9 @@ pub(super) fn mask_free_text(string: &str) -> Cow<'_, str> {
     for token in tokens {
         mask_token_values(&text, token, &mut masks);
     }
-    mask_values_after_key_tokens(&text, &mut masks);
+    let whitespace_tokens = whitespace_tokens(&text);
+    mask_values_after_key_tokens(&text, &whitespace_tokens, &mut masks);
+    mask_authority_user_info(&text, &whitespace_tokens, &mut masks);
     mask_embedded_json_values(&text, &mut masks);
     if masks.is_empty() && text == string {
         return Cow::Borrowed(string);
@@ -278,7 +288,10 @@ struct PairValue {
 ///
 /// A key is one of the token's [`free_text_keys`] that matches a sensitive
 /// key, so it starts the token or follows a `?`, `&`, `;`, `(`, `,`, `#` or
-/// any other character that cannot be part of a key. The separator is `=` or
+/// any other character that cannot be part of a key. A key followed by `=`,
+/// `:=` or `%3D` may also be an `Authorization` header name, as in
+/// `?authorization=Bearer%20x`. One `'`, `` ` `` or `"` may close the key
+/// before its separator, as in `` `password`=x ``. The separator is `=` or
 /// `:=`, or `:` when a value follows it and no `?`, `&` or `;` introduced the
 /// key, as in `apikey:value`; `%3D` and `%3A` act as `=` and `:`. The value,
 /// which may be empty, runs to the next `&` or `#`, so a `?` inside it is
@@ -299,9 +312,13 @@ fn sensitive_pair_values(token: &str) -> Vec<PairValue> {
         else {
             continue;
         };
-        let Some((separator, separator_len)) = leading_separator(after_key) else {
+        let quote_len = usize::from(after_key.starts_with(['\'', '`', '"']));
+        let Some((separator, separator_len)) =
+            after_key.get(quote_len..).and_then(leading_separator)
+        else {
             continue;
         };
+        let separator_len = separator_len.saturating_add(quote_len);
         let introducer = before_key.chars().next_back();
         let value_follows = after_key.len() > separator_len;
         let separated = match separator {
@@ -309,11 +326,11 @@ fn sensitive_pair_values(token: &str) -> Vec<PairValue> {
             Separator::ColonEquals => value_follows,
             Separator::Colon => value_follows && !matches!(introducer, Some('?' | '&' | ';')),
         };
-        if !separated
-            || !token
-                .get(key.clone())
-                .is_some_and(is_sensitive_free_text_key)
-        {
+        let key_text = token.get(key.clone()).unwrap_or_default();
+        let sensitive = is_sensitive_free_text_key(key_text)
+            || (!matches!(separator, Separator::Colon)
+                && is_authorization_name(&percent_decoded(key_text)));
+        if !separated || !sensitive {
             continue;
         }
         let value_start = key.end.saturating_add(separator_len);
@@ -334,6 +351,11 @@ fn sensitive_pair_values(token: &str) -> Vec<PairValue> {
             })
         } else {
             value_start..value_end
+        };
+        let value = if quote_len == 1 {
+            unquoted(token, value)
+        } else {
+            value
         };
         values.push(PairValue {
             value,
@@ -422,38 +444,73 @@ impl BracketCounts {
     }
 }
 
-/// Whether `character` can be part of a free-text key: an ASCII letter or
-/// digit, `-` or `_`.
-const fn is_key_character(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+/// Whether `byte` can be part of a free-text key: an ASCII letter or digit,
+/// `-` or `_`.
+const fn is_key_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+}
+
+/// The length of the key character at `index` of `bytes`: 1 for a key byte,
+/// 3 for a `%` escape that decodes to one, as in `api%5Fkey`, and 0 for
+/// anything else, so `%3D` ends a key.
+fn key_character_len(bytes: &[u8], index: usize) -> usize {
+    match bytes.get(index) {
+        Some(&byte) if is_key_byte(byte) => 1,
+        Some(b'%') if percent_escape_at(bytes, index).is_some_and(is_key_byte) => 3,
+        _ => 0,
+    }
 }
 
 /// Finds the keys in a token: each run of key characters, which starts the
 /// token or follows a character that cannot be part of a key, so a key is
 /// never matched from the middle of a word.
 fn free_text_keys(token: &str) -> impl Iterator<Item = Range<usize>> {
-    let mut characters = token.char_indices();
+    let bytes = token.as_bytes();
+    let mut index = 0;
     std::iter::from_fn(move || {
-        let start = characters
-            .by_ref()
-            .find(|&(_, character)| is_key_character(character))?
-            .0;
-        let end = characters
-            .by_ref()
-            .find(|&(_, character)| !is_key_character(character))
-            .map_or(token.len(), |(index, _)| index);
-        Some(start..end)
+        while index < bytes.len() && key_character_len(bytes, index) == 0 {
+            index = index.saturating_add(1);
+        }
+        if index >= bytes.len() {
+            return None;
+        }
+        let start = index;
+        loop {
+            let len = key_character_len(bytes, index);
+            if len == 0 {
+                break;
+            }
+            index = index.saturating_add(len);
+        }
+        Some(start..index)
     })
 }
 
 /// Finds where the key that ends `text` starts, or `text.len()` when no key
 /// character ends it.
 fn trailing_key_start(text: &str) -> usize {
-    text.char_indices()
-        .rev()
-        .take_while(|&(_, character)| is_key_character(character))
-        .last()
-        .map_or(text.len(), |(index, _)| index)
+    let bytes = text.as_bytes();
+    let mut start = bytes.len();
+    loop {
+        if let Some(escape) = start.checked_sub(3)
+            && percent_escape_at(bytes, escape).is_some_and(is_key_byte)
+        {
+            start = escape;
+            continue;
+        }
+        match start.checked_sub(1) {
+            Some(before) if bytes.get(before).copied().is_some_and(is_key_byte) => {
+                start = before;
+            }
+            _ => return start,
+        }
+    }
+}
+
+/// `text` without one closing `'`, `` ` `` or `"`, so a quoted key such as
+/// `'token'` is found by [`trailing_key_start`].
+fn strip_closing_quote(text: &str) -> &str {
+    text.strip_suffix(['\'', '`', '"']).unwrap_or(text)
 }
 
 /// A value separator after a free-text key.
@@ -486,15 +543,18 @@ fn leading_separator(text: &str) -> Option<(Separator, usize)> {
     }
 }
 
-/// Finds where a `:`, `:=` or `%3A` separator that ends `token` starts.
+/// Finds where a `:`, `:=`, `=`, `%3A` or `%3D` separator that ends `token`
+/// starts.
 fn trailing_separator_start(token: &str) -> Option<usize> {
-    [":=", ":", "%3A"].into_iter().find_map(|separator| {
-        let start = token.len().checked_sub(separator.len())?;
-        token
-            .get(start..)?
-            .eq_ignore_ascii_case(separator)
-            .then_some(start)
-    })
+    [":=", ":", "=", "%3A", "%3D"]
+        .into_iter()
+        .find_map(|separator| {
+            let start = token.len().checked_sub(separator.len())?;
+            token
+                .get(start..)?
+                .eq_ignore_ascii_case(separator)
+                .then_some(start)
+        })
 }
 
 /// Leaves a `)`, `]` or `}` that ends `value` outside it when `is_open`
@@ -587,28 +647,52 @@ fn leading_pair_value_start(segment: &str) -> Option<usize> {
         .then(|| separator.saturating_add(2))
 }
 
-/// Marks the values after sensitive keys and `Authorization` headers that
-/// whitespace separates from their key.
+/// Marks the values after sensitive keys, `Authorization` headers and
+/// `Cookie` headers that whitespace separates from their key.
 ///
-/// See [`value_after_key_token`] and [`authorization_credentials`].
-fn mask_values_after_key_tokens(text: &str, masks: &mut Vec<Range<usize>>) {
-    let tokens = whitespace_tokens(text);
+/// See [`value_after_key_token`] and [`header_credentials`].
+fn mask_values_after_key_tokens(
+    text: &str,
+    tokens: &[Range<usize>],
+    masks: &mut Vec<Range<usize>>,
+) {
+    let line_breaks = text
+        .char_indices()
+        .filter(|&(_, character)| is_line_break(character))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let mut line_masked_to = 0;
     for index in 0..tokens.len() {
-        masks.extend(value_after_key_token(text, &tokens, index));
-        masks.extend(authorization_credentials(text, &tokens, index));
+        masks.extend(value_after_key_token(text, tokens, index));
+        masks.extend(header_credentials(
+            text,
+            tokens,
+            index,
+            &line_breaks,
+            &mut line_masked_to,
+        ));
     }
+}
+
+/// Whether `character` ends a line.
+const fn is_line_break(character: char) -> bool {
+    matches!(
+        character,
+        '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
 }
 
 /// Finds the value in the token after a sensitive key token and its separator.
 ///
 /// The key ends the token and starts it or follows a character that cannot
-/// be part of a key, as in [`free_text_keys`]. The token after a `key:` or
-/// `key:=` token, such as `apikey:`, `X-Api-Key:` or `(apikey:`, is masked.
-/// When a key token is followed by a token starting with `=`, `:` or `:=`,
-/// the value after that separator is masked, as in `apikey =value`, or the
-/// token after a lone separator, as in `apikey := value`. `%3D` and `%3A`
-/// act as `=` and `:`. A `)`, `]` or `}` ending the value stays visible when
-/// the key follows the matching opener, as in `(apikey: ********)`.
+/// be part of a key, as in [`free_text_keys`], and may be closed by one
+/// quote, as in `'token':`. The token after a `key:`, `key=` or `key:=`
+/// token, such as `apikey:`, `X-Api-Key:` or `(apikey:`, is masked. When a
+/// key token is followed by a token starting with `=`, `:` or `:=`, the value
+/// after that separator is masked, as in `apikey =value`, or the token after
+/// a lone separator, as in `apikey := value`. `%3D` and `%3A` act as `=` and
+/// `:`. A `)`, `]` or `}` ending the value stays visible when the key follows
+/// the matching opener, as in `(apikey: ********)`.
 fn value_after_key_token(
     text: &str,
     tokens: &[Range<usize>],
@@ -628,121 +712,299 @@ fn value_after_key_token(
             (current, value)
         }
     };
+    let key = strip_closing_quote(key);
     let key_start = trailing_key_start(key);
     if !key.get(key_start..).is_some_and(is_sensitive_free_text_key) {
         return None;
     }
-    Some(without_closing_bracket(
+    Some(unquoted(
         text,
-        value,
-        opens(key.get(..key_start)?),
+        without_closing_bracket(text, value, opens(key.get(..key_start)?)),
     ))
 }
 
-/// Finds the credential after an `Authorization` or `Proxy-Authorization` header name.
+/// Narrows `value` to the inside of its quotes, so a quoted value masks as
+/// `"********"`: after an opening `'`, `` ` `` or `"`, the value ends at the
+/// first of the same quote in it that is not escaped, or runs to its end
+/// when there is none, so `"S1","token":"S2"` leaves the second pair for its
+/// own rule.
+/// Without an opening quote, a closing quote before any `,` or `;` that ends
+/// the value is left out when the value holds an odd number of that quote,
+/// so it closes a string opened before the value, as in `S"` from
+/// `"Bearer S"`, rather than one inside it, as in `response="S"`.
+fn unquoted(text: &str, value: Range<usize>) -> Range<usize> {
+    let Some(content) = text.get(value.clone()) else {
+        return value;
+    };
+    if let Some(quote) = content
+        .chars()
+        .next()
+        .filter(|&c| matches!(c, '\'' | '`' | '"'))
+    {
+        let inner = content.get(1..).unwrap_or_default();
+        let start = value.start.saturating_add(1);
+        return match closing_quote(inner, quote) {
+            Some(end) => start..start.saturating_add(end),
+            None => start..value.end,
+        };
+    }
+    let kept = content.trim_end_matches([',', ';']);
+    let kept = match kept.chars().next_back() {
+        Some(quote @ ('\'' | '`' | '"')) if kept.matches(quote).count() % 2 == 1 => {
+            kept.get(..kept.len().saturating_sub(1)).unwrap_or(kept)
+        }
+        _ => kept,
+    };
+    value.start..value.start.saturating_add(kept.len())
+}
+
+/// A header whose value is a credential.
+#[derive(Clone, Copy)]
+enum CredentialHeader {
+    /// `Authorization` or `Proxy-Authorization`: a scheme, then credentials.
+    Authorization,
+    /// `Cookie` or `Set-Cookie`: credentials only.
+    Cookie,
+}
+
+/// The credential header `name` names, compared in any case after percent
+/// decoding.
+fn credential_header(name: &str) -> Option<CredentialHeader> {
+    let name = percent_decoded(name);
+    if is_authorization_name(&name) {
+        Some(CredentialHeader::Authorization)
+    } else if name.eq_ignore_ascii_case("Cookie") || name.eq_ignore_ascii_case("Set-Cookie") {
+        Some(CredentialHeader::Cookie)
+    } else {
+        None
+    }
+}
+
+/// Finds the credentials after an `Authorization`, `Proxy-Authorization`,
+/// `Cookie` or `Set-Cookie` header name.
 ///
 /// The name matches in any case and starts a word, as a key does in
-/// [`free_text_keys`]. Its `:` may have whitespace on either side or be
-/// glued to the next word, as in `Authorization:Bearer`. The next word is a
-/// scheme when it is made only of ASCII letters and another token follows
-/// it on the same line: the scheme stays visible and that token is masked.
-/// Otherwise the next word is masked, and so is the token after it when one
-/// follows, on the same line or a later one. So `Authorization: Bearer: value`
-/// masks both, and so does `Authorization: Bearer` with `value` on the next
-/// line.
-fn authorization_credentials(
+/// [`free_text_keys`], and may be closed by one quote. Its separator, `:`,
+/// `=`, `:=`, `%3A` or `%3D`, may have whitespace on either side or be glued
+/// to the next word, as in `Authorization:Bearer` or `Authorization=Bearer`.
+///
+/// After a `Cookie` or `Set-Cookie` name, everything from the next word to
+/// the end of its line is masked. After an `Authorization` name, the next
+/// word is a scheme when it is made only of ASCII letters and another token
+/// follows it on the same line: the scheme stays visible. After a `Bearer`
+/// scheme the token that follows is masked; after any other scheme, such as
+/// `Basic` or `Digest`, everything after the scheme to the end of its line
+/// is. When the next word is not a scheme, it is masked, and so is the token
+/// after it when one follows, on the same line or a later one. So
+/// `Authorization: Bearer: value` masks both, and so does
+/// `Authorization: Bearer` with `value` on the next line.
+///
+/// A value masked to the end of its line moves `line_masked_to` to its end,
+/// and a later one that would start before it is already inside it and is
+/// skipped, so those values never overlap and the work stays linear.
+fn header_credentials(
     text: &str,
     tokens: &[Range<usize>],
     index: usize,
+    line_breaks: &[usize],
+    line_masked_to: &mut usize,
 ) -> Vec<Range<usize>> {
-    let Some((before_name, word, word_token)) = authorization_word(text, tokens, index) else {
+    let Some((header, before_name, word, word_token)) = header_word(text, tokens, index) else {
         return Vec::new();
     };
+    let word = unquoted(text, word);
     let follow = tokens.get(word_token.saturating_add(1)).cloned();
     let follows_on_the_same_line = follow.as_ref().is_some_and(|follow| {
-        !text.get(word.end..follow.start).is_some_and(|gap| {
-            gap.contains([
-                '\n', '\r', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}',
-            ])
-        })
+        !text
+            .get(word.end..follow.start)
+            .is_some_and(|gap| gap.contains(is_line_break))
     });
+    let word_text = text.get(word.clone()).unwrap_or_default();
     let scheme = follows_on_the_same_line
-        && text.get(word.clone()).is_some_and(|word| {
-            word.chars()
-                .all(|character| character.is_ascii_alphabetic())
-        });
+        && word_text
+            .chars()
+            .all(|character| character.is_ascii_alphabetic());
+    let mut rest_of_line = |start: usize| {
+        (start >= *line_masked_to).then(|| {
+            let value = to_line_end(text, line_breaks, start);
+            *line_masked_to = value.end;
+            value
+        })
+    };
     let mut credentials = Vec::new();
-    if !scheme {
-        credentials.push(word);
+    match header {
+        CredentialHeader::Cookie => credentials.extend(rest_of_line(word.start)),
+        CredentialHeader::Authorization if scheme => {
+            if let Some(follow) = follow {
+                if word_text.eq_ignore_ascii_case("Bearer") {
+                    credentials.push(follow);
+                } else {
+                    credentials.extend(rest_of_line(follow.start));
+                }
+            }
+        }
+        CredentialHeader::Authorization => {
+            credentials.push(word);
+            credentials.extend(follow);
+        }
     }
-    credentials.extend(follow);
     if let Some(last) = credentials.pop() {
-        credentials.push(without_closing_bracket(text, last, opens(before_name)));
+        credentials.push(unquoted(
+            text,
+            without_closing_bracket(text, last, opens(before_name)),
+        ));
     }
     credentials
 }
 
-/// Finds the word after an `Authorization` header name in token `index`.
+/// The range from `start` to the end of its line, without trailing
+/// whitespace. `line_breaks` holds the position of every line break in
+/// `text`, in order.
+fn to_line_end(text: &str, line_breaks: &[usize], start: usize) -> Range<usize> {
+    let next_break = line_breaks.partition_point(|&line_break| line_break < start);
+    let end = line_breaks.get(next_break).copied().unwrap_or(text.len());
+    let kept = text.get(start..end).map_or(0, |line| line.trim_end().len());
+    start..start.saturating_add(kept)
+}
+
+/// Finds the word after a credential header name in token `index`.
 ///
-/// Returns the token's text before the name, the word's range and the
-/// index of the token that the word ends.
-fn authorization_word<'text>(
+/// Returns the header, the token's text before the name, the word's range
+/// and the index of the token that the word ends.
+fn header_word<'text>(
     text: &'text str,
     tokens: &[Range<usize>],
     index: usize,
-) -> Option<(&'text str, Range<usize>, usize)> {
+) -> Option<(CredentialHeader, &'text str, Range<usize>, usize)> {
     let token = tokens.get(index)?;
     let current = text.get(token.clone())?;
-    let named_colon = current.match_indices(':').find_map(|(colon, _)| {
-        let name = current.get(..colon)?;
+    let named_separator = current.char_indices().find_map(|(position, _)| {
+        let (separator, separator_len) = leading_separator(current.get(position..)?)?;
+        let name = strip_closing_quote(current.get(..position)?);
         let name_start = trailing_key_start(name);
-        name.get(name_start..)
-            .is_some_and(is_authorization_name)
-            .then_some((name_start, token.start.saturating_add(colon)))
+        let introducer = name.get(..name_start)?.chars().next_back();
+        if !matches!(separator, Separator::Colon) && matches!(introducer, Some('?' | '&')) {
+            // A query parameter: the pair rules mask its whole value.
+            return None;
+        }
+        let header = credential_header(name.get(name_start..)?)?;
+        Some((
+            header,
+            name_start,
+            token.start.saturating_add(position),
+            separator_len,
+        ))
     });
-    let (name_start, colon, colon_token) = match named_colon {
-        Some((name_start, colon)) => (name_start, colon, index),
+    let (header, name_start, separator, separator_len, separator_token) = match named_separator {
+        Some((header, name_start, separator, separator_len)) => {
+            (header, name_start, separator, separator_len, index)
+        }
         None => {
-            let name_start = trailing_key_start(current);
-            if !current.get(name_start..).is_some_and(is_authorization_name) {
-                return None;
-            }
+            let name = strip_closing_quote(current);
+            let name_start = trailing_key_start(name);
+            let header = credential_header(name.get(name_start..)?)?;
             let next_index = index.saturating_add(1);
             let next = tokens.get(next_index)?;
-            if !text.get(next.clone())?.starts_with(':') {
-                return None;
-            }
-            (name_start, next.start, next_index)
+            let (_, separator_len) = leading_separator(text.get(next.clone())?)?;
+            (header, name_start, next.start, separator_len, next_index)
         }
     };
-    let colon_end = tokens.get(colon_token)?.end;
-    let word_start = colon.saturating_add(1);
-    let (word, word_token) = if word_start < colon_end {
-        (word_start..colon_end, colon_token)
+    let separator_end = tokens.get(separator_token)?.end;
+    let word_start = separator.saturating_add(separator_len);
+    let (word, word_token) = if word_start < separator_end {
+        (word_start..separator_end, separator_token)
     } else {
-        let word_token = colon_token.saturating_add(1);
+        let word_token = separator_token.saturating_add(1);
         (tokens.get(word_token)?.clone(), word_token)
     };
-    Some((current.get(..name_start)?, word, word_token))
+    Some((header, current.get(..name_start)?, word, word_token))
 }
 
 pub(super) fn is_authorization_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("Authorization") || name.eq_ignore_ascii_case("Proxy-Authorization")
 }
 
+/// Masks the user information after every `//` in `text`.
+///
+/// The authority runs from the `//` to the next `/`, `?`, `#` or whitespace,
+/// so `postgres://admin:pw@db`, `ftp://u:p@h` and the scheme-relative
+/// `//u:pw@h` are all found. When the authority holds an `@`, the user
+/// information before its last `@` is masked, keeping a username before a
+/// `:` visible. When it holds none, the authority may have been cut, as in
+/// `https://u:p/w@host` for a password holding a `/`: if the whitespace
+/// token holds exactly one `@` after the `//`, everything between them is
+/// masked, which over-masks a URL with an `@` in its path rather than leave
+/// a password in clear.
+///
+/// The `//`s are visited in order with cursors that only move forward, so
+/// the work is linear in the length of the text.
+fn mask_authority_user_info(text: &str, tokens: &[Range<usize>], masks: &mut Vec<Range<usize>>) {
+    let mut next_at = NextByte::new(text, b"@");
+    let mut token_index = 0;
+    let mut last_at_in_token: Option<(usize, Option<usize>)> = None;
+    for (slashes, _) in text.match_indices("//") {
+        let start = slashes.saturating_add(2);
+        let rest = text.get(start..).unwrap_or_default();
+        let authority_len = rest
+            .find(|character: char| {
+                matches!(character, '/' | '?' | '#') || character.is_whitespace()
+            })
+            .unwrap_or(rest.len());
+        let authority = rest.get(..authority_len).unwrap_or_default();
+        if let Some(at) = authority.rfind('@') {
+            let user_info = authority.get(..at).unwrap_or_default();
+            let masked_from = user_info
+                .find(':')
+                .map_or(0, |colon| colon.saturating_add(1));
+            if masked_from < at {
+                masks.push(start.saturating_add(masked_from)..start.saturating_add(at));
+            }
+            continue;
+        }
+        while tokens
+            .get(token_index)
+            .is_some_and(|token| token.end <= start)
+        {
+            token_index = token_index.saturating_add(1);
+        }
+        let Some(token) = tokens.get(token_index).filter(|token| token.start <= start) else {
+            continue;
+        };
+        let first_at = next_at.at_or_after(start);
+        if first_at >= token.end || first_at == start {
+            continue;
+        }
+        let last_at = match last_at_in_token {
+            Some((cached, last_at)) if cached == token_index => last_at,
+            _ => {
+                let last_at = text
+                    .get(token.clone())
+                    .and_then(|token_text| token_text.rfind('@'))
+                    .map(|at| token.start.saturating_add(at));
+                last_at_in_token = Some((token_index, last_at));
+                last_at
+            }
+        };
+        if last_at == Some(first_at) {
+            masks.push(start..first_at);
+        }
+    }
+}
+
 /// Marks the content of a quoted string after a quoted sensitive key in embedded JSON.
 ///
 /// The key is a sensitive key, a compound or header name ending in one, or
-/// an `Authorization` or `Proxy-Authorization` header name, quoted with `"`
-/// or, for JSON escaped inside a string, with `\"`. It is followed by
-/// optional whitespace, `:` and optional whitespace, as in
-/// `{"apiKey": "value"}` or `{\"apiKey\":\"value\"}`, and the string's whole
-/// content is masked. A `"` string ends at the first `"` that is not
-/// escaped and a `\"` string at the next `\"`. An unterminated string is
-/// left as it is. The text is not parsed, so values that are not strings
-/// are unchanged.
+/// an `Authorization` or `Proxy-Authorization` header name, quoted with `"`,
+/// with `'` as in Python or JavaScript literals, or, for JSON escaped inside
+/// a string, with `\"`. It is followed by optional whitespace, `:` and
+/// optional whitespace, as in `{"apiKey": "value"}`, `{'token': 'value'}` or
+/// `{\"apiKey\":\"value\"}`, and the string's whole content is masked. A `"`
+/// or `'` string ends at the first quote that is not escaped and a `\"`
+/// string at the next `\"`. An unterminated string is left as it is. The
+/// text is not parsed, so values that are not strings are unchanged.
 fn mask_embedded_json_values(text: &str, masks: &mut Vec<Range<usize>>) {
-    mask_quoted_json_values(text, "\"", closing_quote, masks);
+    mask_quoted_json_values(text, "\"", |content| closing_quote(content, '"'), masks);
+    mask_quoted_json_values(text, "'", |content| closing_quote(content, '\''), masks);
     mask_quoted_json_values(text, "\\\"", |content| content.find("\\\""), masks);
 }
 
@@ -777,13 +1039,13 @@ fn mask_quoted_json_values(
     }
 }
 
-/// Finds the first `"` in `content` that is not escaped.
+/// Finds the first `quote` in `content` that is not escaped.
 ///
-/// As in JSON, a `"` is escaped only when an odd number of consecutive
+/// As in JSON, a quote is escaped only when an odd number of consecutive
 /// backslashes comes right before it, so `\\"` closes the string.
-fn closing_quote(content: &str) -> Option<usize> {
+fn closing_quote(content: &str, quote: char) -> Option<usize> {
     content
-        .match_indices('"')
+        .match_indices(quote)
         .map(|(index, _)| index)
         .find(|&index| {
             let backslashes = content.get(..index).map_or(0, |before| {

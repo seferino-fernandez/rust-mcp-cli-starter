@@ -140,12 +140,13 @@ impl<T: schemars::JsonSchema> schemars::JsonSchema for Redacted<T> {
 
 /// Masks credentials in free text.
 ///
-/// The value after a sensitive key, or a compound or header name ending in
-/// one, and a `=`, `:` or `:=` separator is masked wherever the key starts a
-/// word, in a query or `;` pair, a header, a `key: value` pair split by
-/// whitespace or an embedded JSON string, and so is the credential after an
-/// `Authorization` header, each path segment after a sensitive path segment,
-/// and the user information of `http` and `https` URLs. Use it for messages
+/// The value after a sensitive key (as the crate README lists them),
+/// possibly quoted, and a `=`, `:` or `:=` separator is masked wherever the
+/// key starts a word, in a query or `;` pair, a header, a `key: value` pair
+/// split by whitespace or an embedded JSON or single-quoted string, and so
+/// are the credentials after an `Authorization`, `Proxy-Authorization`,
+/// `Cookie` or `Set-Cookie` header, each path segment after a sensitive path
+/// segment, and the user information after any `//`. Use it for messages
 /// built from result fields; [`Redacted::new`] already applies it to every
 /// string it holds. Text that nothing in it could mask is borrowed without
 /// being copied, and the work is linear in the length of the text.
@@ -164,7 +165,7 @@ pub fn redact_text(text: &str) -> Cow<'_, str> {
 }
 
 /// The sensitive keys, in lower case.
-const SENSITIVE_KEYS: [&str; 10] = [
+const SENSITIVE_KEYS: [&str; 13] = [
     "apikey",
     "api_key",
     "apitoken",
@@ -175,6 +176,9 @@ const SENSITIVE_KEYS: [&str; 10] = [
     "passkey",
     "secret",
     "token",
+    "privatekey",
+    "credential",
+    "cookie",
 ];
 
 /// The length of the longest of the [`SENSITIVE_KEYS`].
@@ -190,41 +194,51 @@ const LONGEST_SENSITIVE_KEY: usize = {
     longest
 };
 
-/// Matches a sensitive key, compared in any case.
+/// Matches a sensitive key exactly, compared in any case.
+///
+/// Only the URL scanner uses it, to decide where a URL may end; every rule
+/// that decides what to mask uses [`is_sensitive_free_text_key`].
 fn is_sensitive_key(key: &str) -> bool {
     SENSITIVE_KEYS
         .iter()
         .any(|sensitive| key.eq_ignore_ascii_case(sensitive))
 }
 
-/// Matches an object key whose value is a credential: a sensitive key or an
-/// `Authorization` or `Proxy-Authorization` header name, compared in any case.
-///
-/// The header names are not [`SENSITIVE_KEYS`], because free text keeps the
-/// scheme after `Authorization:` visible and masks only the credential.
+/// Matches an object key whose value is a credential, with the same rule as
+/// free text: a sensitive key, a compound, camelCase or header name ending in
+/// one, or an `Authorization` or `Proxy-Authorization` header name.
 fn is_sensitive_object_key(key: &str) -> bool {
-    is_sensitive_key(key) || free_text::is_authorization_name(key)
+    is_sensitive_free_text_key(key) || free_text::is_authorization_name(key)
 }
 
-/// Matches a sensitive key, or a compound or header name that ends in one, in free text.
+/// Matches a sensitive key, or a compound, camelCase or header name that
+/// ends in one, in free text or as an object key.
 ///
-/// A leading `x-` or `x_` is dropped and the name is split into parts at
-/// `-` and `_`. The name matches when its parts, or some trailing run of
-/// them, joined, are a sensitive key, compared in any case. So `X-Api-Key`
-/// names `apikey`, and `access_token` and `X-Auth-Token` end in `token`, but
-/// `mytoken` and `authtoken` have no part boundary before `token`.
+/// The name is percent-decoded first, so `api%5Fkey` and `%61pikey` name
+/// `api_key` and `apikey`. A leading `x-` or `x_` is dropped and the name is
+/// split into parts at `-` and `_`, and where a lower-case letter or a digit
+/// is followed by an upper-case one, or an upper-case letter is followed by
+/// an upper-case one and then a lower-case one. The name matches when its
+/// parts, or some trailing run of them, joined, are a sensitive key or a
+/// sensitive key followed by `s`, compared in any case. So `X-Api-Key`,
+/// `apiKey` and `apiKeys` name `apikey`, and `access_token`, `X-Auth-Token`,
+/// `accessToken` and `sessionToken` end in `token`, but `mytoken` and
+/// `authtoken` have no part boundary before `token`.
 ///
-/// The name is read backwards, without `-` and `_`, into a buffer as long as
-/// the longest sensitive key, and each trailing run that starts a part is
-/// compared as it is read, so nothing is allocated.
+/// The name is read backwards, without `-` and `_`, into a buffer one byte
+/// longer than the longest sensitive key, and each trailing run that starts
+/// a part is compared as it is read, so nothing is allocated unless the
+/// name holds a `%`.
 pub(crate) fn is_sensitive_free_text_key(key: &str) -> bool {
+    let decoded = percent_decoded(key);
+    let key = decoded.as_ref();
     let name = key
         .get(..2)
         .filter(|prefix| prefix.eq_ignore_ascii_case("x-") || prefix.eq_ignore_ascii_case("x_"))
         .and_then(|_| key.get(2..))
         .unwrap_or(key);
     let bytes = name.as_bytes();
-    let mut tail = [0_u8; LONGEST_SENSITIVE_KEY];
+    let mut tail = [0_u8; LONGEST_SENSITIVE_KEY + 1];
     let mut tail_start = tail.len();
     for (index, &byte) in bytes.iter().enumerate().rev() {
         if free_text::is_part_separator(byte) {
@@ -237,21 +251,77 @@ pub(crate) fn is_sensitive_free_text_key(key: &str) -> bool {
         if let Some(slot) = tail.get_mut(start) {
             *slot = byte;
         }
-        let starts_part = index
-            .checked_sub(1)
-            .and_then(|before| bytes.get(before))
-            .is_none_or(|&before| free_text::is_part_separator(before));
-        if starts_part
-            && tail.get(start..).is_some_and(|run| {
-                SENSITIVE_KEYS
-                    .iter()
-                    .any(|sensitive| sensitive.as_bytes().eq_ignore_ascii_case(run))
-            })
-        {
+        if starts_part(bytes, index) && tail.get(start..).is_some_and(is_sensitive_run) {
             return true;
         }
     }
     false
+}
+
+/// Whether the byte at `index` of a key name starts one of its parts.
+fn starts_part(bytes: &[u8], index: usize) -> bool {
+    let Some(&before) = index.checked_sub(1).and_then(|before| bytes.get(before)) else {
+        return true;
+    };
+    let Some(&current) = bytes.get(index) else {
+        return false;
+    };
+    let after = index.checked_add(1).and_then(|after| bytes.get(after));
+    free_text::is_part_separator(before)
+        || ((before.is_ascii_lowercase() || before.is_ascii_digit())
+            && current.is_ascii_uppercase())
+        || (before.is_ascii_uppercase()
+            && current.is_ascii_uppercase()
+            && after.is_some_and(u8::is_ascii_lowercase))
+}
+
+/// Whether `run`, a key without `-` and `_`, is a sensitive key or a
+/// sensitive key followed by `s`, compared in any case.
+fn is_sensitive_run(run: &[u8]) -> bool {
+    let singular = match run.split_last() {
+        Some((last, rest)) if last.eq_ignore_ascii_case(&b's') => Some(rest),
+        _ => None,
+    };
+    SENSITIVE_KEYS.iter().any(|sensitive| {
+        let sensitive = sensitive.as_bytes();
+        sensitive.eq_ignore_ascii_case(run)
+            || singular.is_some_and(|singular| sensitive.eq_ignore_ascii_case(singular))
+    })
+}
+
+/// Decodes every `%` followed by two hex digits in `text`, borrowing text
+/// without a `%`. Bytes that do not form UTF-8 once decoded are replaced.
+fn percent_decoded(text: &str) -> Cow<'_, str> {
+    if !text.contains('%') {
+        return Cow::Borrowed(text);
+    }
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        match percent_escape_at(bytes, index) {
+            Some(value) => {
+                decoded.push(value);
+                index = index.saturating_add(3);
+            }
+            None => {
+                decoded.push(byte);
+                index = index.saturating_add(1);
+            }
+        }
+    }
+    Cow::Owned(String::from_utf8_lossy(&decoded).into_owned())
+}
+
+/// The byte a `%` and two hex digits at `index` of `bytes` encode, if they
+/// are there.
+fn percent_escape_at(bytes: &[u8], index: usize) -> Option<u8> {
+    if bytes.get(index) != Some(&b'%') {
+        return None;
+    }
+    let high = char::from(*bytes.get(index.checked_add(1)?)?).to_digit(16)?;
+    let low = char::from(*bytes.get(index.checked_add(2)?)?).to_digit(16)?;
+    u8::try_from(high.checked_mul(16)?.checked_add(low)?).ok()
 }
 
 fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
@@ -316,6 +386,22 @@ mod tests {
             "token",
             "Authorization",
             "proxy-authorization",
+            "client_secret",
+            "access_token",
+            "refresh_token",
+            "X-Api-Key",
+            "Api-Key",
+            "x_api_key",
+            "privateKey",
+            "private_key",
+            "sessionToken",
+            "accessToken",
+            "clientSecret",
+            "apiKeys",
+            "Cookie",
+            "Set-Cookie",
+            "credentials",
+            "api%5Fkey",
         ] {
             let data = serde_json::json!({ key: SENTINEL, "name": "visible" });
             assert_eq!(
@@ -324,6 +410,63 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn redacted_new_masks_an_array_under_a_plural_sensitive_key() {
+        let data = serde_json::json!({ "apiKeys": ["a", "b"], "tokens": { "x": "y" } });
+
+        assert_eq!(
+            redacted_value(&data),
+            serde_json::json!({ "apiKeys": MASKED_VALUE, "tokens": MASKED_VALUE })
+        );
+    }
+
+    #[test]
+    fn redacted_new_keeps_keys_that_only_contain_a_sensitive_word() {
+        let data = serde_json::json!({
+            "mytoken": "v",
+            "authtoken": "v",
+            "token_count": 3,
+            "keyboard": "v",
+            "secretary": "v"
+        });
+
+        assert_eq!(redacted_value(&data), data);
+    }
+
+    #[test]
+    fn redacted_new_masks_object_keys() {
+        let data = serde_json::json!({
+            "https://u:pw@h": 1,
+            "note apikey=S": 2,
+            "plain": 3
+        });
+
+        assert_eq!(
+            redacted_value(&data),
+            serde_json::json!({
+                "https://u:********@h": 1,
+                "note apikey=********": 2,
+                "plain": 3
+            })
+        );
+    }
+
+    #[test]
+    fn scrubbing_masks_a_map_keyed_by_the_secret() {
+        let data = std::collections::BTreeMap::from([
+            (SENTINEL.to_string(), 1),
+            ("https://u:pw@h".to_string(), 2),
+        ]);
+
+        let redacted = Redacted::scrubbing(&data, &[SecretString::from(SENTINEL)])
+            .expect("redaction succeeds");
+
+        assert_eq!(
+            redacted.as_value(),
+            &serde_json::json!({ "********": 1, "https://u:********@h": 2 })
+        );
     }
 
     #[test]
@@ -432,12 +575,12 @@ mod tests {
     }
 
     #[test]
-    fn structural_header_name_key_is_not_a_sensitive_key() {
+    fn structural_header_name_key_is_a_sensitive_key() {
         let mut value = serde_json::json!({ "X-Api-Key": "S" });
 
         redact_json(&mut value);
 
-        assert_eq!(value, serde_json::json!({ "X-Api-Key": "S" }));
+        assert_eq!(value, serde_json::json!({ "X-Api-Key": "********" }));
     }
 
     #[test]
@@ -476,10 +619,23 @@ mod tests {
             "word ".repeat(13_107)
         );
 
+        let many_slashes = "//a".repeat(21_845);
+        let percent_keys = "%61%70%69=".repeat(6_553);
+        let quoted_keys = "'tok':'".repeat(9_362);
+        let separators = "a=".repeat(32_768);
+        let camel_words = "aBcDeF".repeat(10_922);
+        let colons = "aXy:".repeat(16_384);
+
         for (name, input) in [
             ("A: 16 spaced 4 KiB URLs", spaced_long_urls),
             ("B: 1,024 glued query URLs", glued_query_urls),
             ("C: one URL before 64 KiB of words", url_before_words),
+            ("D: 64 KiB of // authorities", many_slashes),
+            ("E: 64 KiB of percent-encoded keys", percent_keys),
+            ("F: 64 KiB of single-quoted keys", quoted_keys),
+            ("G: 64 KiB of = separators", separators),
+            ("H: 64 KiB of camelCase", camel_words),
+            ("I: 64 KiB of colon-separated names", colons),
         ] {
             let elapsed = time_free_text_rules(&input);
             eprintln!("{name}: {} bytes in {elapsed:?}", input.len());
@@ -488,6 +644,45 @@ mod tests {
                 "{name} took {elapsed:?}"
             );
             assert!(matches!(redact_text(&input), Cow::Borrowed(_)));
+        }
+    }
+
+    #[test]
+    fn free_text_redaction_is_linear_on_hostile_inputs_it_masks() {
+        let slashes_before_one_at = format!("{}@h", "//a:b".repeat(13_107));
+        let authorities = "//u:p@h ".repeat(8_192);
+        let header_names = "Authorization: Basic ".repeat(3_120);
+        let cookies = "Cookie: a ".repeat(6_553);
+        let quoted_token_keys = "'token':'".repeat(7_281);
+        let double_quoted_token_keys = "\"token\":\"".repeat(7_281);
+        let percent_separated = "api%5Fkey%3D".repeat(5_461);
+        let camel_keys = "accessToken=x ".repeat(4_681);
+
+        for (name, input) in [
+            ("K: 64 KiB of // before one @", slashes_before_one_at),
+            ("L: 8,192 authorities with user information", authorities),
+            ("M: 64 KiB of Authorization headers", header_names),
+            ("N: 64 KiB of Cookie headers", cookies),
+            (
+                "O: 64 KiB of single-quoted sensitive keys",
+                quoted_token_keys,
+            ),
+            (
+                "P: 64 KiB of double-quoted sensitive keys",
+                double_quoted_token_keys,
+            ),
+            ("Q: 64 KiB of percent-encoded pairs", percent_separated),
+            ("R: 64 KiB of camelCase pairs", camel_keys),
+        ] {
+            let start = Instant::now();
+            let redacted = redact_text(&input);
+            let elapsed = start.elapsed();
+            eprintln!("{name}: {} bytes in {elapsed:?}", input.len());
+            assert!(matches!(redacted, Cow::Owned(_)), "{name} is masked");
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "{name} took {elapsed:?}"
+            );
         }
     }
 
@@ -990,14 +1185,14 @@ mod tests {
             r#"response {"Token": "********"} rejected"#,
         ),
         (
-            "unterminated_embedded_json_sensitive_value_is_unchanged",
+            "unterminated_embedded_json_sensitive_value_is_masked",
             r#"{"apikey": "SECRET"#,
-            r#"{"apikey": "SECRET"#,
+            r#"{"apikey": "********"#,
         ),
         (
-            "non_string_embedded_json_sensitive_value_is_unchanged",
+            "non_string_embedded_json_sensitive_value_is_masked",
             r#"{"apikey": 12345}"#,
-            r#"{"apikey": 12345}"#,
+            r#"{"apikey": ********}"#,
         ),
         (
             "sensitive_pair_after_a_second_question_mark_in_a_token_is_masked",
@@ -1055,9 +1250,9 @@ mod tests {
             "/api/token/\nS",
         ),
         (
-            "empty_sensitive_query_value_before_whitespace_masks_only_up_to_the_whitespace",
+            "empty_sensitive_query_value_before_whitespace_masks_the_next_token",
             "?apikey= S",
-            "?apikey=******** S",
+            "?apikey=******** ********",
         ),
         (
             "http_url_sensitive_pair_after_whitespace_in_its_query_is_masked",
@@ -1508,6 +1703,141 @@ mod tests {
             "prefilter_passes_url_user_info",
             "https://u:p@h",
             "https://u:********@h",
+        ),
+        (
+            "camel_case_key_in_a_pair_is_masked",
+            "accessToken=S1 clientSecret=S2 apiKey=S3 sessionToken=S4",
+            "accessToken=******** clientSecret=******** apiKey=******** sessionToken=********",
+        ),
+        (
+            "plural_and_new_sensitive_keys_are_masked",
+            "apiKeys=S1 private_key=S2 credentials=S3",
+            "apiKeys=******** private_key=******** credentials=********",
+        ),
+        (
+            "percent_encoded_underscore_in_a_query_key_is_masked",
+            "https://h/x?api%5Fkey=S&page=2",
+            "https://h/x?api%5Fkey=********&page=2",
+        ),
+        (
+            "percent_encoded_letter_in_a_query_key_is_masked",
+            "https://h/x?%61pikey=S&page=2",
+            "https://h/x?%61pikey=********&page=2",
+        ),
+        (
+            "percent_encoded_key_and_separator_are_masked",
+            "api%5Fkey%3DS",
+            "api%5Fkey%3D********",
+        ),
+        (
+            "postgres_user_info_is_masked",
+            "connect postgres://admin:pw@db:5432/app failed",
+            "connect postgres://admin:********@db:5432/app failed",
+        ),
+        (
+            "ftp_user_info_is_masked",
+            "ftp://u:p@h/file",
+            "ftp://u:********@h/file",
+        ),
+        (
+            "scheme_relative_user_info_is_masked",
+            "see //u:pw@h/x",
+            "see //u:********@h/x",
+        ),
+        (
+            "user_info_without_a_password_is_masked_whole_for_any_scheme",
+            "redis://S@cache:6379",
+            "redis://********@cache:6379",
+        ),
+        (
+            "user_info_cut_by_a_slash_in_the_password_is_masked_whole",
+            "https://u:p/w@host/path",
+            "https://********@host/path",
+        ),
+        (
+            "user_info_cut_by_a_slash_in_another_scheme_is_masked_whole",
+            "amqp://guest:pa/ss@broker",
+            "amqp://********@broker",
+        ),
+        (
+            "user_info_shown_truncated_before_its_at_is_masked",
+            "https://u:p…@host/path",
+            "https://u:********@host/path",
+        ),
+        (
+            "two_ats_after_a_cut_authority_mask_nothing_extra",
+            "https://h/a@b/c@d",
+            "https://h/a@b/c@d",
+        ),
+        (
+            "single_quoted_python_dict_value_is_masked",
+            "{'token': 'S', 'ok': 'yes'}",
+            "{'token': '********', 'ok': 'yes'}",
+        ),
+        (
+            "single_quoted_authorization_value_is_masked_whole",
+            "{'Authorization': 'Bearer S'}",
+            "{'Authorization': '********'}",
+        ),
+        (
+            "backtick_quoted_key_before_equals_is_masked",
+            "`password`=S",
+            "`password`=********",
+        ),
+        (
+            "double_quoted_key_before_equals_is_masked",
+            "\"secret\"=S",
+            "\"secret\"=********",
+        ),
+        (
+            "single_quoted_key_before_a_separate_value_is_masked",
+            "'apikey': S",
+            "'apikey': ********",
+        ),
+        (
+            "authorization_with_equals_masks_the_credential",
+            "Authorization=Bearer S",
+            "Authorization=******** ********",
+        ),
+        (
+            "percent_encoded_authorization_pair_is_masked",
+            "authorization%3DBearer%20S",
+            "authorization%3D********",
+        ),
+        (
+            "authorization_query_parameter_is_masked",
+            "https://h/x?authorization=Bearer%20S&page=2",
+            "https://h/x?authorization=********&page=2",
+        ),
+        (
+            "basic_credentials_are_masked_to_the_end_of_the_line",
+            "Authorization: Basic dXNlcjpwYXNz trailing words\nnext line",
+            "Authorization: Basic ********\nnext line",
+        ),
+        (
+            "digest_parameters_are_masked_to_the_end_of_the_line",
+            "Authorization: Digest username=\"u\", realm=\"r\", response=\"S\"",
+            "Authorization: Digest ********",
+        ),
+        (
+            "custom_scheme_credentials_are_masked_to_the_end_of_the_line",
+            "Proxy-Authorization: Custom part-one part-two",
+            "Proxy-Authorization: Custom ********",
+        ),
+        (
+            "bearer_credentials_mask_only_the_token",
+            "Authorization: Bearer S was rejected",
+            "Authorization: Bearer ******** was rejected",
+        ),
+        (
+            "cookie_header_is_masked_to_the_end_of_the_line",
+            "Cookie: session=S1; theme=dark\nnext",
+            "Cookie: ********\nnext",
+        ),
+        (
+            "set_cookie_header_is_masked_to_the_end_of_the_line",
+            "Set-Cookie: sid=S; Path=/; HttpOnly",
+            "Set-Cookie: ********",
         ),
     ];
 
