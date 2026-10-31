@@ -1,6 +1,7 @@
 //! MCP tool implementations for the MYAPP API.
 
 mod confirm;
+mod error;
 mod handler;
 mod item_tools;
 mod params;

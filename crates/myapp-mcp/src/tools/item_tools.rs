@@ -1,16 +1,23 @@
 //! Example MCP tools mirroring the core endpoint methods.
 //!
 //! Every tool name carries the `myapp_` prefix, so a client running several
-//! MCP servers can tell this server's tools apart.
+//! MCP servers can tell this server's tools apart. Every tool returns
+//! `Json<Redacted<T>>`, built by [`ApiClient::redact`], so credentials and the
+//! client's API key never reach the model, and fails with a [`ToolError`],
+//! so a core error shows only its public message.
+//!
+//! [`ApiClient::redact`]: myapp_core::ApiClient::redact
 
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
     tool, tool_router,
 };
 
+use super::error::ToolError;
 use super::handler::AppTools;
 use super::params::{CreateItemParams, ItemIdParams, ListItemsParams};
-use super::types::{DeleteResult, Items, format_tool_error};
+use super::types::{DeleteResult, Items};
+use myapp_core::Redacted;
 use myapp_core::models::{Item, NewItem, SystemStatus};
 
 #[tool_router(router = item_router, vis = "pub(super)")]
@@ -25,13 +32,9 @@ impl AppTools {
             open_world_hint = false
         )
     )]
-    async fn get_system_status(&self) -> Result<Json<SystemStatus>, String> {
-        let status = self
-            .client
-            .system_status()
-            .await
-            .map_err(|error| format_tool_error(&error))?;
-        Ok(Json(status))
+    async fn get_system_status(&self) -> Result<Json<Redacted<SystemStatus>>, ToolError> {
+        let status = self.client.system_status().await?;
+        Ok(Json(self.client.redact(&status)?))
     }
 
     #[tool(
@@ -47,13 +50,12 @@ impl AppTools {
     async fn list_items(
         &self,
         Parameters(params): Parameters<ListItemsParams>,
-    ) -> Result<Json<Items<Item>>, String> {
+    ) -> Result<Json<Redacted<Items<Item>>>, ToolError> {
         let page = self
             .client
             .list_items(params.page, params.page_size)
-            .await
-            .map_err(|error| format_tool_error(&error))?;
-        Ok(Json(page.into()))
+            .await?;
+        Ok(Json(self.client.redact(&Items::from(page))?))
     }
 
     #[tool(
@@ -69,13 +71,9 @@ impl AppTools {
     async fn get_item(
         &self,
         Parameters(params): Parameters<ItemIdParams>,
-    ) -> Result<Json<Item>, String> {
-        let item = self
-            .client
-            .get_item(params.id)
-            .await
-            .map_err(|error| format_tool_error(&error))?;
-        Ok(Json(item))
+    ) -> Result<Json<Redacted<Item>>, ToolError> {
+        let item = self.client.get_item(params.id).await?;
+        Ok(Json(self.client.redact(&item)?))
     }
 
     #[tool(
@@ -92,16 +90,15 @@ impl AppTools {
     async fn create_item(
         &self,
         Parameters(params): Parameters<CreateItemParams>,
-    ) -> Result<Json<Item>, String> {
+    ) -> Result<Json<Redacted<Item>>, ToolError> {
         let item = self
             .client
             .create_item(&NewItem {
                 name: params.name,
                 enabled: params.enabled,
             })
-            .await
-            .map_err(|error| format_tool_error(&error))?;
-        Ok(Json(item))
+            .await?;
+        Ok(Json(self.client.redact(&item)?))
     }
 
     #[tool(
@@ -118,15 +115,12 @@ impl AppTools {
     async fn delete_item(
         &self,
         Parameters(params): Parameters<ItemIdParams>,
-    ) -> Result<Json<DeleteResult>, String> {
-        self.client
-            .delete_item(params.id)
-            .await
-            .map_err(|error| format_tool_error(&error))?;
-        Ok(Json(DeleteResult {
+    ) -> Result<Json<Redacted<DeleteResult>>, ToolError> {
+        self.client.delete_item(params.id).await?;
+        Ok(Json(self.client.redact(&DeleteResult {
             deleted: true,
             id: params.id,
-        }))
+        })?))
     }
 }
 
@@ -315,6 +309,95 @@ mod tests {
 
         assert_eq!(result.is_error, Some(true), "{result:?}");
         assert!(first_text(&result).contains("list tool"), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn get_item_result_comes_back_redacted() {
+        let server = MockServer::start().await;
+        let embedded = json!({ "password": "S2", "token": "S3" });
+        let name = format!(
+            "apikey=S1 {embedded} https://user:S4@tracker.example/passkey/S5/announce key {TEST_API_KEY}"
+        );
+        Mock::given(method("GET"))
+            .and(path("/api/v3/item/42"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "id": 42, "name": name, "enabled": true })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tools = tools_for(&server);
+
+        let result = call_tool(&tools, "myapp_get_item", json!({ "id": 42 })).await;
+
+        let text = first_text(&result).to_string();
+        let structured = structured(result);
+        assert_eq!(
+            structured,
+            json!({
+                "id": 42,
+                "name": r#"apikey=******** {"password":"********","token":"********"} https://user:********@tracker.example/passkey/********/announce key ********"#,
+                "enabled": true
+            })
+        );
+        for shown in [structured.to_string(), text] {
+            for secret in ["S1", "S2", "S3", "S4", "S5", TEST_API_KEY] {
+                assert!(!shown.contains(secret), "leaked {secret}: {shown}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_500_with_the_api_key_and_a_secret_url_shows_only_the_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/item/9"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "message": format!(
+                    "key {TEST_API_KEY} rejected by https://backend.internal/check?password=query-secret"
+                )
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tools = tools_for(&server);
+
+        let result = call_tool(&tools, "myapp_get_item", json!({ "id": 9 })).await;
+
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert_eq!(
+            first_text(&result),
+            "upstream API request failed with status 500"
+        );
+        let shown = format!("{result:?}");
+        for secret in [TEST_API_KEY, "query-secret", "backend.internal"] {
+            assert!(!shown.contains(secret), "leaked {secret}: {shown}");
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_redirect_is_not_followed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/item/9"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "https://elsewhere.example/x"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tools = tools_for(&server);
+
+        let result = call_tool(&tools, "myapp_get_item", json!({ "id": 9 })).await;
+
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert!(
+            first_text(&result)
+                .starts_with("the upstream server redirected the request (HTTP 302)"),
+            "{result:?}"
+        );
+        assert!(!format!("{result:?}").contains("elsewhere.example"));
     }
 
     #[tokio::test]
