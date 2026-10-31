@@ -170,17 +170,26 @@ fn listen_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
     })
 }
 
+/// Builds the streamable HTTP service factory. rmcp calls it for every
+/// stateless request and every new legacy session, so it hands out clones of
+/// one prebuilt handle instead of rebuilding the tool router.
+fn service_factory(
+    tools: AppTools,
+) -> impl Fn() -> Result<AppTools, std::io::Error> + Send + Sync + 'static {
+    move || Ok(tools.clone())
+}
+
 pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     let addr = listen_addr(&config.mcp.host, config.mcp.port)?;
     let auth = HttpAuth::resolve(config, &addr)?;
 
-    let api_client = create_api_client(config)?;
-    let max_response_bytes = config.mcp.max_response_bytes;
+    let tools = AppTools::new(create_api_client(config)?, config.mcp.max_response_bytes)
+        .with_confirm_destructive(config.mcp.confirm_destructive);
 
     let cancellation_token = CancellationToken::new();
     let session_manager: Arc<LocalSessionManager> = Arc::default();
     let service: StreamableHttpService<AppTools, LocalSessionManager> = StreamableHttpService::new(
-        move || Ok(AppTools::new(api_client.clone(), max_response_bytes)),
+        service_factory(tools),
         session_manager,
         StreamableHttpServerConfig::default()
             // Sessions apply only to protocol versions older than 2026-07-28.
@@ -761,7 +770,7 @@ mod wire_tests {
         };
         let client = myapp_core::ApiClient::new(core_config).expect("client builds");
         StreamableHttpService::new(
-            move || Ok(AppTools::new(client.clone(), 1024 * 1024)),
+            service_factory(AppTools::new(client, 1024 * 1024)),
             Arc::default(),
             StreamableHttpServerConfig::default()
                 .with_legacy_session_mode(true)
@@ -974,6 +983,171 @@ mod wire_tests {
             "legacy peers must not receive resultType: {result}"
         );
         assert_eq!(result["tools"].as_array().map(Vec::len), Some(5));
+    }
+
+    /// A modern `tools/call` of `name` with `arguments`, with every routing
+    /// header a 2026-07-28 client sends, including the `Mcp-Param-Item-Id`
+    /// promoted from `id`, as `bearer`.
+    fn oauth_tool_call(name: &str, arguments: Value, bearer: &str) -> axum::http::Request<Body> {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("authorization", format!("Bearer {bearer}"))
+            .header("mcp-protocol-version", V_MODERN)
+            .header("mcp-method", "tools/call")
+            .header("mcp-name", name);
+        if let Some(id) = arguments.get("id") {
+            request = request.header("mcp-param-item-id", id.to_string());
+        }
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": V_MODERN,
+                    "io.modelcontextprotocol/clientInfo": { "name": "wire-test", "version": "0" },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+        request
+            .body(Body::from(body.to_string()))
+            .expect("request builds")
+    }
+
+    /// The OAuth middleware's scopes reach `call_tool` through the streamable
+    /// HTTP transport: a `read` token is refused a write tool on the wire and
+    /// the upstream is never contacted, while a `write` token reaches it.
+    #[tokio::test]
+    async fn oauth_scopes_are_enforced_on_the_wire() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/item/7"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let store = OAuthStore::new(OAuthStoreConfig::default());
+        let service: StreamableHttpService<AppTools, LocalSessionManager> =
+            StreamableHttpService::new(
+                service_factory(crate::tools::test_support::tools_for(&server)),
+                Arc::default(),
+                StreamableHttpServerConfig::default()
+                    .with_legacy_session_mode(true)
+                    .with_allowed_hosts(McpConfig::default().allowed_hosts),
+            );
+        let app = axum::Router::new().nest_service("/mcp", service).layer(
+            middleware::from_fn_with_state(
+                OAuthMiddlewareState {
+                    store: store.clone(),
+                    resource_metadata_url: "http://localhost/.well-known/oauth-protected-resource"
+                        .to_string(),
+                },
+                oauth_bearer_auth,
+            ),
+        );
+
+        let mut results = Vec::new();
+        for scope in ["read", "write"] {
+            let token = store.create_access_token("wire-test".to_string(), vec![scope.to_string()]);
+            let request = oauth_tool_call("myapp_delete_item", json!({ "id": 7 }), &token.token);
+            let response = app.clone().oneshot(request).await.expect("infallible");
+            assert!(
+                response.status().is_success(),
+                "{scope}: {}",
+                response.status()
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body collects");
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            let payloads: Vec<Value> = if text.contains("data:") {
+                text.lines()
+                    .filter_map(|line| line.strip_prefix("data:"))
+                    .filter_map(|data| serde_json::from_str(data.trim()).ok())
+                    .collect()
+            } else {
+                serde_json::from_str::<Value>(&text).into_iter().collect()
+            };
+            results.push(result_of(&payloads));
+        }
+
+        let [read, write] = results.as_slice() else {
+            panic!("two results: {results:?}");
+        };
+        assert_eq!(read["isError"], true, "{read}");
+        assert_eq!(
+            read["content"][0]["text"],
+            "insufficient_scope: tool 'myapp_delete_item' requires the 'write' scope",
+            "{read}"
+        );
+        assert_ne!(write["isError"], true, "{write}");
+        assert_eq!(write["structuredContent"]["deleted"], true, "{write}");
+    }
+
+    /// Every stateless request and legacy session gets the one handler built
+    /// at startup rather than a freshly assembled router.
+    #[test]
+    fn service_factory_shares_one_built_handler() {
+        let factory = service_factory(crate::tools::test_support::tools_at(
+            myapp_core::Config::default().base_url,
+            1024 * 1024,
+        ));
+        let first = factory().expect("factory yields a handler");
+        let second = factory().expect("factory yields a handler");
+        assert!(
+            first.shares_state_with(&second),
+            "each per-request handler must share the state built at startup"
+        );
+    }
+
+    /// rmcp 3.8 answers the 2026-07-28 `server/discover` request from
+    /// `get_info`: the supported versions, the tools capability and this
+    /// server's own identity.
+    #[tokio::test]
+    async fn server_discover_advertises_the_modern_protocol() {
+        let service = mcp_service();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": V_MODERN,
+                    "io.modelcontextprotocol/clientInfo": { "name": "wire-test", "version": "0" },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+        let (status, headers, payloads) = post(&service, body, None, Some(V_MODERN)).await;
+
+        assert!(
+            status.is_success(),
+            "server/discover failed: {status} {payloads:?}"
+        );
+        assert!(headers.get("mcp-session-id").is_none(), "{headers:?}");
+        let result = result_of(&payloads);
+        assert!(
+            result["supportedVersions"]
+                .as_array()
+                .is_some_and(|versions| versions.iter().any(|version| version == V_MODERN)),
+            "{result}"
+        );
+        assert!(result["capabilities"]["tools"].is_object(), "{result}");
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            env!("CARGO_PKG_NAME"),
+            "{result}"
+        );
     }
 
     /// `ProtocolVersion::LATEST` caught up to 2026-07-28 in rmcp 3.5, but

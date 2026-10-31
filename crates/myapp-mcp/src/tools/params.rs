@@ -1,11 +1,15 @@
 //! Parameter structs for MCP tools. Each derives `JsonSchema` so rmcp can
 //! advertise an input schema, plus `Deserialize` for argument parsing.
+//!
+//! Every struct denies unknown fields, so a misspelled argument fails the call
+//! instead of silently falling back to a default.
 
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-/// Parameters for `list_items`.
+/// Parameters for `myapp_list_items`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListItemsParams {
     /// 1-based page number.
     #[serde(default = "default_page")]
@@ -24,8 +28,9 @@ fn default_page_size() -> u32 {
     20
 }
 
-/// Parameters for `get_item` / `delete_item`.
+/// Parameters for `myapp_get_item` / `myapp_delete_item`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ItemIdParams {
     /// Item id.
     ///
@@ -40,8 +45,9 @@ pub struct ItemIdParams {
     pub id: i64,
 }
 
-/// Parameters for `create_item`.
+/// Parameters for `myapp_create_item`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateItemParams {
     /// Item name.
     pub name: String,
@@ -50,10 +56,67 @@ pub struct CreateItemParams {
     pub enabled: bool,
 }
 
+/// Decodes a free-form JSON request body (a `body: serde_json::Value`
+/// parameter) into `T`, without including submitted content in the error.
+///
+/// serde's messages quote the offending value, which for a request body may
+/// be a secret, so the error names only the parameter and the expected model.
+/// rmcp decodes the typed params structs above itself; use this for any body
+/// a tool decodes on its own.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "template helper for tools in generated projects that take a JSON body"
+    )
+)]
+pub(crate) fn decode_body<T: serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+    parameter: &str,
+    model: &str,
+) -> Result<T, String> {
+    serde_json::from_value(value).map_err(|_error| format!("invalid {parameter}: expected {model}"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ListItemsParams;
+    use super::{CreateItemParams, ItemIdParams, ListItemsParams, decode_body};
     use schemars::schema_for;
+    use serde_json::json;
+
+    #[test]
+    fn every_params_struct_denies_unknown_fields() {
+        let unknown = |result: Result<(), serde_json::Error>| {
+            let message = result.expect_err("an unknown field is refused").to_string();
+            assert!(message.contains("unknown field `extra`"), "{message}");
+        };
+        unknown(serde_json::from_value::<ListItemsParams>(json!({ "extra": 1 })).map(drop));
+        unknown(serde_json::from_value::<ItemIdParams>(json!({ "id": 1, "extra": 1 })).map(drop));
+        unknown(
+            serde_json::from_value::<CreateItemParams>(json!({ "name": "n", "extra": 1 }))
+                .map(drop),
+        );
+    }
+
+    #[test]
+    fn decode_body_never_echoes_the_submitted_body() {
+        let error = decode_body::<CreateItemParams>(
+            json!({ "name": "hunter2-secret", "enabled": "hunter2-secret" }),
+            "body",
+            "an item",
+        )
+        .expect_err("a mistyped field is refused");
+        assert_eq!(error, "invalid body: expected an item");
+        assert!(!error.contains("hunter2"), "{error}");
+    }
+
+    #[test]
+    fn decode_body_decodes_a_valid_body() {
+        let params: CreateItemParams =
+            decode_body(json!({ "name": "n", "enabled": true }), "body", "an item").unwrap();
+        assert_eq!(params.name, "n");
+        assert!(params.enabled);
+    }
 
     #[test]
     fn list_items_params_bound_page_and_page_size() {

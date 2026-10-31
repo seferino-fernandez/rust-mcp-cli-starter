@@ -1,7 +1,7 @@
 //! Shared helpers and result types for MCP tool handlers.
 
 use myapp_core::Error;
-use myapp_core::models::Item;
+use myapp_core::pagination::Page;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -32,21 +32,62 @@ pub(crate) fn format_tool_error(error: &Error) -> String {
     }
 }
 
-/// Structured result for `list_items`.
+/// A list result: the items plus their count, and the page they came from
+/// when the upstream endpoint is paginated.
 ///
-/// The MCP spec requires a tool's `outputSchema` to have an `object` root, so a
-/// bare array is not allowed, so the page is wrapped in this envelope, which also
-/// surfaces the pagination totals the model needs to fetch further pages.
+/// The MCP spec requires a tool's `outputSchema` to have an `object` root, so
+/// a bare array is not allowed; wrapping a `Vec<T>` as
+/// `{ "items": [...], "count": N }` keeps list tools spec-compliant. A
+/// paginated list also carries the totals the model needs to fetch further
+/// pages.
 #[derive(Debug, Serialize, JsonSchema)]
-pub(crate) struct ListItemsResult {
-    /// Items on the requested page.
-    pub items: Vec<Item>,
-    /// 1-based page index.
-    pub page: u32,
-    /// Number of items requested per page.
-    pub page_size: u32,
-    /// Total items available across all pages.
-    pub total_records: u32,
+pub(crate) struct Items<T> {
+    /// The listed items.
+    pub items: Vec<T>,
+    /// The number of items in `items`.
+    pub count: usize,
+    /// 1-based page index, for a paginated list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    /// Number of items requested per page, for a paginated list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    /// Total items available across all pages, for a paginated list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_records: Option<u32>,
+}
+
+impl<T> Items<T> {
+    /// Wraps an unpaginated list, recording its length as `count`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "template helper for unpaginated list tools in generated projects"
+        )
+    )]
+    pub fn new(items: Vec<T>) -> Self {
+        Self {
+            count: items.len(),
+            items,
+            page: None,
+            page_size: None,
+            total_records: None,
+        }
+    }
+}
+
+impl<T> From<Page<T>> for Items<T> {
+    /// Wraps one upstream page, keeping its pagination totals.
+    fn from(page: Page<T>) -> Self {
+        Self {
+            count: page.records.len(),
+            items: page.records,
+            page: Some(page.page),
+            page_size: Some(page.page_size),
+            total_records: Some(page.total_records),
+        }
+    }
 }
 
 /// Structured result for `delete_item`. The core delete endpoint returns no
@@ -62,8 +103,18 @@ pub(crate) struct DeleteResult {
 
 #[cfg(test)]
 mod tests {
-    use super::format_tool_error;
+    use super::{Items, format_tool_error};
     use myapp_core::Error;
+    use serde_json::json;
+
+    #[test]
+    fn unpaginated_items_omit_the_page_fields() {
+        let items = Items::new(vec![1, 2, 3]);
+        assert_eq!(
+            serde_json::to_value(items).unwrap(),
+            json!({ "items": [1, 2, 3], "count": 3 })
+        );
+    }
 
     #[test]
     fn parse_failure_is_generic_and_hides_url_and_serde_detail() {

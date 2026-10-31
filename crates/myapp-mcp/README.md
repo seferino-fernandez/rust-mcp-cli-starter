@@ -121,6 +121,10 @@ myapp-mcp --transport http --auth-mode oauth --port 8080
   front of it that limits `/oauth/register` and `/oauth/authorize`.
 - **Errors.** Every OAuth endpoint answers a body or query it cannot parse
   with a JSON OAuth error that does not echo the input.
+- **Scopes.** Clients may request `read` and `write`; a request naming
+  neither gets `read`. A `read` token may call only read-only tools (see
+  [Tool calls](#tool-calls)). Every `401` challenge advertises both, as
+  `WWW-Authenticate: Bearer resource_metadata="...", scope="read write"`.
 - **Tokens.** Access tokens last `oauth_token_expiry_secs`. Refresh tokens
   last 30 days, rotate on use, and are bound to their client: a refresh must
   send the `client_id` it was issued to, and any other value spends the token.
@@ -138,13 +142,45 @@ configured level prints a warning and falls back to `info`.
 
 ## Example tools
 
-| Tool                | Description                                 |
-| ------------------- | ------------------------------------------- |
-| `get_system_status` | Server health/status                        |
-| `list_items`        | List items (paginated: `page`, `page_size`) |
-| `get_item`          | Fetch one item by `id`                      |
-| `create_item`       | Create an item (`name`, `enabled`)          |
-| `delete_item`       | Delete an item by `id`                      |
+Every tool name carries the `myapp_` prefix, so a client running several MCP
+servers can tell this one's tools apart. The scope column is the OAuth scope a
+token needs to call the tool.
+
+| Tool                      | Description                                  | Scope   |
+| ------------------------- | -------------------------------------------- | ------- |
+| `myapp_get_system_status` | Server health/status                         | `read`  |
+| `myapp_list_items`        | List items (paginated: `page`, `page_size`)  | `read`  |
+| `myapp_get_item`          | Fetch one item by `id`                       | `read`  |
+| `myapp_create_item`       | Create an item (`name`, `enabled`)           | `write` |
+| `myapp_delete_item`       | Delete an item by `id` (destructive)         | `write` |
+
+### Tool calls
+
+Every call goes through the same checks, in order:
+
+1. **OAuth scope.** A token without the `write` scope may call only tools
+   annotated `readOnlyHint: true`; any other tool, including one with no
+   hint, answers an `insufficient_scope` tool error before anything else
+   runs. `tools/list` is the same for every token, so a `read` token still
+   sees the write tools. Static-token, `none` and stdio callers carry no
+   scopes and may call every tool.
+2. **Arguments.** An argument the tool's input schema does not declare is
+   refused, without contacting the upstream API. Every params struct also
+   denies unknown fields.
+3. **Confirmation.** A tool annotated `destructiveHint: true`, called by a
+   client that negotiated 2026-07-28 and supports form elicitation, first
+   answers an input-required result asking the user to confirm. The pending
+   call is sealed into its `requestState` (valid for 5 minutes, bound to the
+   tool name, keyed per process). The retry must carry the same arguments and
+   an accepted `confirm: true`; changed arguments, a decline or a cancel are
+   refused. Clients without form elicitation, or on an older protocol, run the
+   tool directly. Turn the prompt off with `[mcp] confirm_destructive = false`
+   or `MYAPP_MCP_CONFIRM_DESTRUCTIVE=false`. This is a courtesy against a
+   model acting alone, not access control: the `write` scope is.
+4. **Response budget.** The whole serialized result, `content` and
+   `structuredContent` together, is capped at `max_response_bytes` (default
+   1 MiB). A larger result is replaced by a small `response_too_large` error;
+   if even that cannot fit, the call fails with a protocol error.
 
 ## Shell completions
 
@@ -206,5 +242,7 @@ column (the offending line is never echoed, since it may hold a secret).
 | `MYAPP_MCP_OAUTH_PIN`               | OAuth consent PIN; 8+ chars, required off loopback   |
 | `MYAPP_MCP_OAUTH_PIN_FILE`          | Path to file containing the OAuth consent PIN        |
 | `MYAPP_MCP_OAUTH_TOKEN_EXPIRY_SECS` | OAuth token lifetime (default: 3600)                 |
+| `MYAPP_MCP_CONFIRM_DESTRUCTIVE`     | Confirm destructive tools (default: `true`)          |
+| `MYAPP_MCP_MAX_RESPONSE_BYTES`      | Tool result size cap in bytes (default: 1 MiB)       |
 
 See [config.toml.example](../../config.toml.example) for all available fields.

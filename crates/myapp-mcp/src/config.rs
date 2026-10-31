@@ -32,6 +32,7 @@ const ENV_MCP_OAUTH_CSRF_NONCE_TTL_SECS: &str = "MYAPP_MCP_OAUTH_CSRF_NONCE_TTL_
 const ENV_MCP_OAUTH_SWEEP_INTERVAL_SECS: &str = "MYAPP_MCP_OAUTH_SWEEP_INTERVAL_SECS";
 const ENV_MCP_OAUTH_CORS_ORIGINS: &str = "MYAPP_MCP_OAUTH_CORS_ORIGINS";
 const ENV_MCP_OAUTH_ALLOW_INSECURE_HTTP: &str = "MYAPP_MCP_OAUTH_ALLOW_INSECURE_HTTP";
+const ENV_MCP_CONFIRM_DESTRUCTIVE: &str = "MYAPP_MCP_CONFIRM_DESTRUCTIVE";
 const ENV_MCP_MAX_RESPONSE_BYTES: &str = "MYAPP_MCP_MAX_RESPONSE_BYTES";
 const ENV_MCP_ALLOWED_HOSTS: &str = "MYAPP_MCP_ALLOWED_HOSTS";
 
@@ -135,8 +136,14 @@ pub struct McpConfig {
     /// tokens and PKCE would otherwise traverse the network unencrypted. Set
     /// only on a trusted private network that terminates TLS elsewhere.
     pub oauth_allow_insecure_http: bool,
-    /// Maximum serialized size (bytes) of a tool result. Results exceeding this
-    /// are replaced with a bounded `response_too_large` error. Defaults to 1 MiB.
+    /// Ask for confirmation before running a destructive tool, when the client
+    /// negotiated MCP 2026-07-28 and supports form elicitation. Clients without
+    /// it run destructive tools directly. Defaults to `true`.
+    pub confirm_destructive: bool,
+    /// Maximum exact serialized size (bytes) of a tool result. Results
+    /// exceeding this are replaced with a bounded `response_too_large` error;
+    /// if even that cannot fit, the call fails with a protocol error. Defaults
+    /// to 1 MiB.
     pub max_response_bytes: usize,
     /// Hostnames (or `host:port` authorities) accepted in the inbound `Host`
     /// header, guarding against DNS rebinding attacks on the MCP endpoint.
@@ -168,6 +175,7 @@ impl Default for McpConfig {
             oauth_sweep_interval_secs: DEFAULT_OAUTH_SWEEP_INTERVAL_SECS,
             oauth_cors: OAuthCorsConfig::default(),
             oauth_allow_insecure_http: false,
+            confirm_destructive: true,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             allowed_hosts: default_allowed_hosts(),
         }
@@ -189,6 +197,7 @@ impl Debug for McpConfig {
             .field("oauth_sweep_interval_secs", &self.oauth_sweep_interval_secs)
             .field("oauth_cors", &self.oauth_cors)
             .field("oauth_allow_insecure_http", &self.oauth_allow_insecure_http)
+            .field("confirm_destructive", &self.confirm_destructive)
             .field("max_response_bytes", &self.max_response_bytes)
             .field("allowed_hosts", &self.allowed_hosts)
             .finish()
@@ -342,6 +351,9 @@ fn apply_mcp_env(mcp: &mut McpConfig, env: &impl Env) -> anyhow::Result<()> {
     }
     if let Some(val) = env_parse_bool(env, ENV_MCP_OAUTH_ALLOW_INSECURE_HTTP)? {
         mcp.oauth_allow_insecure_http = val;
+    }
+    if let Some(val) = env_parse_bool(env, ENV_MCP_CONFIRM_DESTRUCTIVE)? {
+        mcp.confirm_destructive = val;
     }
     if let Some(val) = env_parse::<u64>(env, ENV_MCP_MAX_RESPONSE_BYTES)? {
         // Saturate rather than truncate on 32-bit targets: an absurdly large cap
@@ -814,6 +826,38 @@ origins = ["*"]
         let env = env.with("MYAPP_MCP_OAUTH_ALLOW_INSECURE_HTTP", "true");
         let config = load_http(&env).expect("config loads with the insecure-http override set");
         assert!(config.mcp.oauth_allow_insecure_http);
+    }
+
+    #[test]
+    fn confirm_destructive_defaults_true_and_toml_and_env_override() {
+        assert!(ServerConfig::default().mcp.confirm_destructive);
+
+        let (_directory, env) = env_with_toml("[mcp]\nconfirm_destructive = false\n");
+        assert!(!load_http(&env).unwrap().mcp.confirm_destructive);
+        let env = env.with(ENV_MCP_CONFIRM_DESTRUCTIVE, "true");
+        assert!(load_http(&env).unwrap().mcp.confirm_destructive);
+
+        let (_directory, env) = isolated_env();
+        let env = env.with(ENV_MCP_CONFIRM_DESTRUCTIVE, "false");
+        let config =
+            ServerConfig::load_with_env(None, &ServerOverrides::default(), &env, Transport::Stdio)
+                .unwrap();
+        assert!(
+            !config.mcp.confirm_destructive,
+            "stdio honours the setting too"
+        );
+    }
+
+    #[test]
+    fn invalid_confirm_destructive_env_fails_naming_variable_and_value() {
+        let (_directory, env) = isolated_env();
+        let env = env.with(ENV_MCP_CONFIRM_DESTRUCTIVE, "sometimes");
+        let err = load_http(&env).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(r#"invalid MYAPP_MCP_CONFIRM_DESTRUCTIVE value "sometimes""#),
+            "{err}"
+        );
     }
 
     #[test]

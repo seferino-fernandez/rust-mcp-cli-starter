@@ -33,6 +33,7 @@ rmcp = { workspace = true, features = [
     "transport-streamable-http-server",
     "macros",
     "schemars",
+    "request-state",
 ] }
 schemars.workspace = true
 uuid.workspace = true
@@ -51,6 +52,7 @@ urlencoding.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true
