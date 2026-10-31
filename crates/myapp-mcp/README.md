@@ -78,24 +78,39 @@ myapp-mcp --transport http --auth-mode oauth --port 8080
 - **Consent PIN.** Set with `--oauth-pin`, `MYAPP_MCP_OAUTH_PIN`,
   `MYAPP_MCP_OAUTH_PIN_FILE`, or `[mcp] oauth_pin` / `oauth_pin_file`. It is
   required when binding a non-loopback address, and an empty, whitespace-only,
-  or shorter-than-8-character PIN is refused at startup on any bind. Wrong
-  PINs from every client count together: five within a minute pause approvals
-  for 60 s, doubling with each further miss up to 15 min, with
-  `429 Too Many Requests` and `Retry-After` in the meantime. A correct PIN, or
-  15 quiet minutes, resets the count.
+  or shorter-than-8-character PIN is refused at startup on any bind.
+- **Wrong-PIN lockout.** Wrong PINs from every client count together: five
+  within a minute lock approvals out for 60 s, and after that each further
+  wrong PIN locks them out for another 60 s, answered with
+  `429 Too Many Requests` and `Retry-After`. Each lockout logs a warning with
+  its retry-after seconds, never the PIN. A correct PIN, or 15 quiet minutes,
+  resets the count. The limiter is global, so anyone who can reach the
+  consent endpoint can also lock the owner out; the one-minute cap is the
+  trade-off. It bounds that denial of service to about a minute per lockout,
+  while holding a guesser to roughly one guess a minute, which keeps brute
+  force against an 8-character PIN infeasible.
 - **Registration.** Clients are public: no `client_secret` is issued and
   `token_endpoint_auth_method` is `none`. Each redirect URI must be an
   absolute URL with no fragment and none of `code`, `state`, `error`,
   `error_description`, `error_uri` or `iss` in its query, and be `https`,
   `http` to a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`), or a
   native-app scheme. `javascript`, `data`, `file`, `vbscript`, `blob` and
-  `about` are always refused. At most 1024 clients are kept; past that,
-  registration gets `429` until a client unused for 24 hours is dropped.
+  `about` are always refused. A `client_name` may be at most 256 characters,
+  and a client may register at most 10 redirect URIs of at most 2048 bytes
+  each; anything larger is a `400 invalid_client_metadata`. At most 1024
+  clients are kept; past that, registration gets `429` until a client unused
+  for 24 hours is dropped.
 - **Authorization.** `/oauth/authorize` checks the client and redirect URI
-  first and never redirects on an error; every error is a JSON `400`. The
-  validated request is held on the server under a single-use consent nonce
-  (valid for `oauth_csrf_nonce_ttl_secs`), and the consent page, rendered on
-  the server, posts back only that nonce, the decision and the PIN.
+  first and never redirects on an error; every error, including a malformed
+  query, is a JSON `400`. `state` may be at most 512 bytes, and
+  `code_challenge` must be 43 to 128 characters of `A-Z a-z 0-9 - . _ ~`.
+  The validated request is held on the server under a single-use consent
+  nonce (valid for `oauth_csrf_nonce_ttl_secs`); at most 1024 are held at
+  once, and past that `/oauth/authorize` gets `429`. The consent page,
+  rendered on the server, posts back only that nonce, the decision and the
+  PIN, and a nonce whose client has since been removed is refused.
+- **Errors.** Every OAuth endpoint answers a body or query it cannot parse
+  with a JSON OAuth error that does not echo the input.
 - **Tokens.** Access tokens last `oauth_token_expiry_secs`. Refresh tokens
   last 30 days, rotate on use, and are bound to their client: a refresh must
   send the `client_id` it was issued to, and any other value spends the token.

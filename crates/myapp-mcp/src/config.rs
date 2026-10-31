@@ -122,7 +122,9 @@ pub struct McpConfig {
     pub oauth_token_expiry_secs: u64,
     /// TTL for OAuth authorization codes in seconds.
     pub oauth_auth_code_ttl_secs: u64,
-    /// TTL for OAuth CSRF nonces in seconds.
+    /// How long, in seconds, a pending OAuth authorization (the validated
+    /// `/oauth/authorize` request held for consent) and the single-use consent
+    /// nonce that names it stay valid.
     pub oauth_csrf_nonce_ttl_secs: u64,
     /// Interval between sweeps of expired OAuth entries in seconds.
     pub oauth_sweep_interval_secs: u64,
