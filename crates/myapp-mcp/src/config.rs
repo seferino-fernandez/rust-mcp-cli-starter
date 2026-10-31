@@ -308,7 +308,10 @@ fn apply_mcp_env(mcp: &mut McpConfig, env: &impl Env) -> anyhow::Result<()> {
     if let Some(val) = env_non_empty(env, ENV_MCP_BASE_URL) {
         mcp.base_url = Some(val);
     }
-    if let Some(val) = env_non_empty(env, ENV_MCP_AUTH_MODE) {
+    // Blank counts as unset, as for the `env_parse` variables.
+    if let Some(val) = env.get(ENV_MCP_AUTH_MODE)
+        && !val.trim().is_empty()
+    {
         let Ok(mode) = AuthMode::from_str(val.trim(), false) else {
             anyhow::bail!(
                 "invalid {ENV_MCP_AUTH_MODE} value {val:?}: expected one of token, oauth, none"
@@ -593,6 +596,16 @@ origins = ["*"]
     }
 
     #[test]
+    fn blank_auth_mode_env_keeps_toml_value() {
+        for blank in ["", " ", " \t\n"] {
+            let (_directory, env) = env_with_toml("[mcp]\nauth_mode = \"none\"\n");
+            let env = env.with(ENV_MCP_AUTH_MODE, blank);
+            let config = load_http(&env).unwrap();
+            assert_eq!(config.mcp.auth_mode, AuthMode::None, "{blank:?}");
+        }
+    }
+
+    #[test]
     fn auth_mode_parses_from_toml_env_and_cli() {
         let (_directory, env) = env_with_toml("[mcp]\nauth_mode = \"oauth\"\n");
         assert_eq!(load_http(&env).unwrap().mcp.auth_mode, AuthMode::OAuth);
@@ -633,7 +646,12 @@ origins = ["*"]
         let (directory, env) = env_with_toml("[mcp]\nauth_mode = \"bogus\"\n");
         let err = load_http(&env).unwrap_err();
         let message = err.to_string();
-        assert!(message.contains("unknown variant"), "{message}");
+        assert!(message.contains("unknown variant `********`"), "{message}");
+        assert!(!message.contains("bogus"), "{message}");
+        assert!(
+            message.contains("expected one of `token`, `oauth`, `none`"),
+            "{message}"
+        );
         assert!(
             message.contains(&directory.path().join("config.toml").display().to_string()),
             "{message}"

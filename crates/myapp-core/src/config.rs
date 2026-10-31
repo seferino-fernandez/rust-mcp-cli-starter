@@ -427,8 +427,8 @@ fn read_resolved_config(
 /// The message itself still quotes the offending value for serde type and
 /// value errors (``invalid type: integer `123456`, expected a string``), so a
 /// secret written with the wrong type would leak through it. Every `"…"` and
-/// `` `…` `` span in the message is therefore masked as
-/// [`MASKED_VALUE`](crate::secret::MASKED_VALUE), keeping the delimiters; an
+/// `` `…` `` span before the schema's `, expected …` tail is therefore masked
+/// as [`MASKED_VALUE`](crate::secret::MASKED_VALUE), keeping the delimiters; an
 /// unterminated delimiter masks to the end.
 fn describe_toml_error(text: &str, error: &toml::de::Error) -> String {
     let message = mask_quoted_values(error.message());
@@ -445,18 +445,33 @@ fn describe_toml_error(text: &str, error: &toml::de::Error) -> String {
 }
 
 /// Replaces the content of every `"…"` and `` `…` `` span with
-/// [`MASKED_VALUE`](crate::secret::MASKED_VALUE).
+/// [`MASKED_VALUE`](crate::secret::MASKED_VALUE), up to the first unquoted
+/// `, expected `.
+///
+/// Serde puts the user's value before `, expected ` and the schema's
+/// expectation (variant or field names, a type) after it, so that tail is kept
+/// verbatim: ``unknown variant `********`, expected one of `token`, `oauth` ``.
+/// The marker is only honoured outside a quoted span, so a value containing it
+/// is still masked whole.
 ///
 /// Serde quotes string values with `Debug`, so a `"` inside a `"…"` span is
 /// escaped as `\"`; a backslash there skips the next character instead of
 /// letting an embedded quote end the span early.
 fn mask_quoted_values(message: &str) -> String {
+    const EXPECTED: &str = ", expected ";
     let mut masked = String::with_capacity(message.len());
     let mut open: Option<char> = None;
     let mut escaped = false;
-    for c in message.chars() {
+    for (index, c) in message.char_indices() {
         match open {
             None => {
+                if let Some(tail) = message
+                    .get(index..)
+                    .filter(|rest| rest.starts_with(EXPECTED))
+                {
+                    masked.push_str(tail);
+                    break;
+                }
                 masked.push(c);
                 if c == '"' || c == '`' {
                     masked.push_str(crate::secret::MASKED_VALUE);
@@ -800,6 +815,47 @@ mod tests {
         assert_eq!(
             mask_quoted_values("invalid value: `secret, expected"),
             "invalid value: `********"
+        );
+    }
+
+    #[test]
+    fn mask_quoted_values_keeps_the_expected_tail() {
+        assert_eq!(
+            mask_quoted_values(
+                "unknown variant `SENTINEL`, expected one of `token`, `oauth`, `none`"
+            ),
+            "unknown variant `********`, expected one of `token`, `oauth`, `none`"
+        );
+        // The marker inside a quoted value does not end masking early.
+        assert_eq!(
+            mask_quoted_values(r#"invalid type: string "a, expected SENTINEL", expected u16"#),
+            r#"invalid type: string "********", expected u16"#
+        );
+    }
+
+    #[test]
+    fn unknown_variant_error_names_the_valid_variants_but_not_the_value() {
+        #[derive(Debug, Default, Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum Mode {
+            #[default]
+            Token,
+            OAuth,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct File {
+            #[serde(default)]
+            #[expect(dead_code, reason = "only the parse error is under test")]
+            mode: Mode,
+        }
+
+        let text = "mode = \"SENTINEL-SECRET\"\n";
+        let err = toml::from_str::<File>(text).unwrap_err();
+        let described = describe_toml_error(text, &err);
+        assert!(!described.contains("SENTINEL"), "{described}");
+        assert!(
+            described.contains("expected `token` or `oauth`"),
+            "{described}"
         );
     }
 
