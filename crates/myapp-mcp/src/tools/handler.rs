@@ -9,6 +9,7 @@ use rmcp::model::Tool;
 
 use myapp_core::ApiClient;
 
+use super::confirm::ConsumedConfirmations;
 use super::server::close_tool_schemas;
 
 /// MCP tool handler for the MYAPP API.
@@ -39,6 +40,9 @@ pub struct Inner {
     /// that somehow reaches a tool without them is limited to read-only
     /// tools rather than allowed everything.
     pub(crate) require_scopes: bool,
+    /// The confirmations already used, shared by every handle so each runs
+    /// its tool at most once.
+    pub(super) consumed_confirmations: Arc<ConsumedConfirmations>,
 }
 
 impl AppTools {
@@ -64,6 +68,7 @@ impl AppTools {
             max_response_bytes,
             confirm_destructive: true,
             require_scopes: false,
+            consumed_confirmations: Arc::default(),
         }))
     }
 

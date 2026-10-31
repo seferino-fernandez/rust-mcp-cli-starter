@@ -126,9 +126,11 @@ impl ServerHandler for AppTools {
                 match request.request_state.as_deref() {
                     None => return Ok(confirm::confirmation_request(&request)?.into()),
                     Some(sealed) => {
-                        if let confirm::Verdict::Declined(reason) =
-                            confirm::verify_confirmation(sealed, &request)?
-                        {
+                        if let confirm::Verdict::Declined(reason) = confirm::verify_confirmation(
+                            sealed,
+                            &request,
+                            &self.consumed_confirmations,
+                        )? {
                             return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                                 "confirmation_declined: {reason}"
                             ))])
@@ -629,6 +631,38 @@ mod tests {
             result.structured_content,
             Some(json!({ "deleted": true, "id": 7 }))
         );
+        assert_eq!(request_count(&server).await, 1);
+    }
+
+    /// An accepted confirmation is spent: replaying it, even through another
+    /// handle on the same handler, is refused and the upstream sees exactly
+    /// one DELETE.
+    #[tokio::test]
+    async fn replayed_confirmation_runs_the_tool_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/item/7"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tools = tools_for(&server);
+        let arguments = json!({ "id": 7 });
+        let accept = json!({ "action": "accept", "content": { "confirm": true } });
+
+        let state = first_round(&tools, &server, &arguments).await;
+        let first = complete(retry(&tools, arguments.clone(), state.clone(), accept.clone()).await);
+        assert_succeeded(&first, "first confirmed retry");
+        for handle in [tools.clone(), tools.clone().with_confirm_destructive(true)] {
+            let replay = retry(&handle, arguments.clone(), state.clone(), accept.clone())
+                .await
+                .expect_err("a replayed confirmation is a protocol error");
+            assert_eq!(
+                replay.message,
+                "confirmation already used; call the tool again"
+            );
+        }
+
         assert_eq!(request_count(&server).await, 1);
     }
 
