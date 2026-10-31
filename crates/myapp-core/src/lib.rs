@@ -22,12 +22,15 @@ pub mod error;
 pub mod models;
 /// Pagination envelope.
 pub mod pagination;
+/// Credential redaction for presented output and error text.
+pub mod redact;
 /// Secret-string wrapper that redacts in `Debug`.
 pub mod secret;
 
 pub use client::ApiClient;
 pub use config::{Config, ConfigOverrides, ConfigPathSource};
 pub use error::Error;
+pub use redact::Redacted;
 pub use secret::SecretString;
 
 /// Crate `Result` alias.
