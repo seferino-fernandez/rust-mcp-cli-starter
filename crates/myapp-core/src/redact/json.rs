@@ -8,9 +8,11 @@ use super::{MASKED_VALUE, is_sensitive_object_key};
 
 /// Recursively masks credentials embedded in JSON presentation data.
 ///
-/// A non-null value under a credential-like key is replaced by
-/// [`MASKED_VALUE`], whatever its type, and every other string gets the
-/// free-text rules of [`redact_text`](super::redact_text), so JSON embedded in
+/// Under a credential-like key, a string becomes [`MASKED_VALUE`], and so
+/// does every string inside an array or object there; numbers, booleans and
+/// null are never changed, so the value keeps its type and still matches
+/// its schema (`maxTokens: 4096`, `hasPassword: true`). Every other string
+/// gets the free-text rules of [`redact_text`](super::redact_text), so JSON embedded in
 /// a string is masked too. Object keys get the free-text rules as well, so a
 /// map keyed by URLs with user information is masked; see [`rename_keys`]
 /// for keys that collide once masked.
@@ -23,8 +25,8 @@ pub(crate) fn redact_json(value: &mut serde_json::Value) {
         }
         serde_json::Value::Object(object) => {
             for (key, value) in object.iter_mut() {
-                if is_sensitive_object_key(key) && !value.is_null() {
-                    *value = serde_json::Value::String(MASKED_VALUE.to_string());
+                if is_sensitive_object_key(key) {
+                    mask_strings(value);
                 } else {
                     redact_json(value);
                 }
@@ -42,6 +44,30 @@ pub(crate) fn redact_json(value: &mut serde_json::Value) {
             if let Some(redacted) = redacted {
                 *string = redacted;
             }
+        }
+        _ => {}
+    }
+}
+
+/// Replaces every string in `value`, at any depth, with [`MASKED_VALUE`],
+/// leaving numbers, booleans, null and object keys as they are. Keys get
+/// the free-text rules, as everywhere else.
+fn mask_strings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(string) => *string = MASKED_VALUE.to_string(),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                mask_strings(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for value in object.values_mut() {
+                mask_strings(value);
+            }
+            rename_keys(object, |key| match redact_free_text(key) {
+                Cow::Borrowed(_) => None,
+                Cow::Owned(redacted) => Some(redacted),
+            });
         }
         _ => {}
     }

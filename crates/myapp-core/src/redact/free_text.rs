@@ -19,8 +19,8 @@ use super::{
 /// Masks credentials in free text, borrowing `text` when nothing is masked.
 ///
 /// Text that holds no `@` or `%` and, ignoring `-`, `_` and ASCII case, none
-/// of `key`, `pass`, `secret`, `token`, `authorization`, `credential` or
-/// `cookie` is returned at once: every sensitive key and header name holds
+/// of `key`, `pass`, `pwd`, `secret`, `token`, `authorization`,
+/// `credential` or `cookie` is returned at once: every sensitive key and header name holds
 /// one of those words, a percent-encoded key needs a `%`, and user
 /// information needs an `@`, so no rule can mask it. Other text goes through
 /// [`mask_free_text`].
@@ -40,7 +40,7 @@ fn may_hold_credentials(text: &str) -> bool {
 /// The words, in lower case, one of which every sensitive key and header
 /// name holds once `-` and `_` are removed, each packed by
 /// [`pack_key_word`].
-const KEY_WORDS: [(u128, u128); 7] = [
+const KEY_WORDS: [(u128, u128); 8] = [
     pack_key_word(b"key"),
     pack_key_word(b"pass"),
     pack_key_word(b"secret"),
@@ -48,6 +48,7 @@ const KEY_WORDS: [(u128, u128); 7] = [
     pack_key_word(b"authorization"),
     pack_key_word(b"credential"),
     pack_key_word(b"cookie"),
+    pack_key_word(b"pwd"),
 ];
 
 /// Packs up to 16 bytes into the low bytes of a `u128`, last byte lowest,
@@ -140,6 +141,7 @@ pub(super) fn mask_free_text(string: &str) -> Cow<'_, str> {
     mask_values_after_key_tokens(&text, &whitespace_tokens, &mut masks);
     mask_authority_user_info(&text, &whitespace_tokens, &mut masks);
     mask_embedded_json_values(&text, &mut masks);
+    mask_percent_decoded_tokens(&text, &whitespace_tokens, &mut masks);
     if masks.is_empty() && text == string {
         return Cow::Borrowed(string);
     }
@@ -153,6 +155,94 @@ pub(super) fn mask_free_text(string: &str) -> Cow<'_, str> {
     } else {
         Cow::Owned(redacted)
     }
+}
+
+/// Marks, in each token that holds percent-encoded structure, the values its
+/// percent-decoded form would have masked.
+///
+/// A whitespace token holding `%3A%2F%2F` (an encoded `://`), `%26`, `%3D` or
+/// `%3F`, in any case, may carry a whole encoded URL or query, as in
+/// `?url=https%3A%2F%2Fh%2Fdl%3Fapikey%3Dtok`. Its decoded form goes
+/// through the pair, path, header, user-information and embedded-JSON rules,
+/// and each span they mask is mapped back to the bytes of the original that
+/// encode it. When the decoded bytes are not UTF-8, the whole token is masked
+/// if any rule masks the lossily decoded form. Decoding is done once, so a
+/// doubly encoded value (`%253D`) is read with one level of encoding left.
+fn mask_percent_decoded_tokens(text: &str, tokens: &[Range<usize>], masks: &mut Vec<Range<usize>>) {
+    for token in tokens {
+        let Some(original) = text.get(token.clone()) else {
+            continue;
+        };
+        if !holds_encoded_structure(original) {
+            continue;
+        }
+        let (decoded, starts) = percent_decoded_with_offsets(original);
+        match String::from_utf8(decoded) {
+            Ok(decoded) => {
+                for mask in rule_masks(&decoded) {
+                    let start = starts.get(mask.start).copied().unwrap_or(original.len());
+                    let end = starts.get(mask.end).copied().unwrap_or(original.len());
+                    masks.push(token.start.saturating_add(start)..token.start.saturating_add(end));
+                }
+            }
+            Err(error) => {
+                if !rule_masks(&String::from_utf8_lossy(error.as_bytes())).is_empty() {
+                    masks.push(token.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Whether `token` holds `%3A%2F%2F`, `%26`, `%3D` or `%3F`, in any case.
+fn holds_encoded_structure(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes.windows(3).any(|window| {
+        matches!(
+            window,
+            [b'%', b'2', b'6'] | [b'%', b'3', b'D' | b'd' | b'F' | b'f']
+        )
+    }) || bytes
+        .windows(9)
+        .any(|window| window.eq_ignore_ascii_case(b"%3A%2F%2F"))
+}
+
+/// Decodes every `%` escape in `text`, returning the bytes and, for each
+/// decoded byte and one past the last, where it starts in `text`.
+fn percent_decoded_with_offsets(text: &str) -> (Vec<u8>, Vec<usize>) {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut starts = Vec::with_capacity(bytes.len().saturating_add(1));
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        starts.push(index);
+        match percent_escape_at(bytes, index) {
+            Some(value) => {
+                decoded.push(value);
+                index = index.saturating_add(3);
+            }
+            None => {
+                decoded.push(byte);
+                index = index.saturating_add(1);
+            }
+        }
+    }
+    starts.push(bytes.len());
+    (decoded, starts)
+}
+
+/// The spans that the pair, path, header, user-information and
+/// embedded-JSON rules mask in `text`, read as whitespace-separated tokens.
+fn rule_masks(text: &str) -> Vec<Range<usize>> {
+    let tokens = whitespace_tokens(text);
+    let mut masks = Vec::new();
+    for token in &tokens {
+        mask_token_values(text, token.clone(), &mut masks);
+    }
+    mask_values_after_key_tokens(text, &tokens, &mut masks);
+    mask_authority_user_info(text, &tokens, &mut masks);
+    mask_embedded_json_values(text, &mut masks);
+    masks
 }
 
 /// The free text with the user information of its URLs masked, built from
@@ -469,7 +559,14 @@ fn free_text_keys(token: &str) -> impl Iterator<Item = Range<usize>> {
     let mut index = 0;
     std::iter::from_fn(move || {
         while index < bytes.len() && key_character_len(bytes, index) == 0 {
-            index = index.saturating_add(1);
+            // A whole `%` escape is skipped, so the hex digits of `%3F` never
+            // stick to the key after them.
+            let skipped = if percent_escape_at(bytes, index).is_some() {
+                3
+            } else {
+                1
+            };
+            index = index.saturating_add(skipped);
         }
         if index >= bytes.len() {
             return None;
@@ -499,12 +596,26 @@ fn trailing_key_start(text: &str) -> usize {
             continue;
         }
         match start.checked_sub(1) {
-            Some(before) if bytes.get(before).copied().is_some_and(is_key_byte) => {
+            Some(before)
+                if bytes.get(before).copied().is_some_and(is_key_byte)
+                    && !is_inside_escape(bytes, before) =>
+            {
                 start = before;
             }
             _ => return start,
         }
     }
+}
+
+/// Whether the byte at `index` is a hex digit of a `%` escape, which
+/// [`trailing_key_start`] only reaches for an escape that decodes to a
+/// character that cannot be part of a key, so the key ends there.
+fn is_inside_escape(bytes: &[u8], index: usize) -> bool {
+    [1, 2].into_iter().any(|back| {
+        index
+            .checked_sub(back)
+            .is_some_and(|escape| percent_escape_at(bytes, escape).is_some())
+    })
 }
 
 /// `text` without one closing `'`, `` ` `` or `"`, so a quoted key such as
@@ -724,14 +835,19 @@ fn value_after_key_token(
 }
 
 /// Narrows `value` to the inside of its quotes, so a quoted value masks as
-/// `"********"`: after an opening `'`, `` ` `` or `"`, the value ends at the
-/// first of the same quote in it that is not escaped, or runs to its end
-/// when there is none, so `"S1","token":"S2"` leaves the second pair for its
-/// own rule.
-/// Without an opening quote, a closing quote before any `,` or `;` that ends
-/// the value is left out when the value holds an odd number of that quote,
-/// so it closes a string opened before the value, as in `S"` from
-/// `"Bearer S"`, rather than one inside it, as in `response="S"`.
+/// `"********"`.
+///
+/// After an opening `'`, `` ` `` or `"`, the value narrows to the text before
+/// the first of the same quote that is not escaped, but only when that quote
+/// ends the value or is followed only by `,`, `;`, `}`, `]` or `)`; otherwise,
+/// as in `'abc'def` or `"S1","token":"S2"`, the whole value stays masked. An
+/// unterminated quoted value is masked from after its opening quote.
+/// Without an opening quote, a closing quote that ends the value, possibly
+/// followed by `,` or `;`, is left out together with them when the value
+/// holds an odd number of that quote, so it closes a string opened before
+/// the value, as in `S"` from `"Bearer S"`, rather than one inside it, as in
+/// `response="S"`. Otherwise the value is kept whole, trailing `,` and `;`
+/// included.
 fn unquoted(text: &str, value: Range<usize>) -> Range<usize> {
     let Some(content) = text.get(value.clone()) else {
         return value;
@@ -744,18 +860,30 @@ fn unquoted(text: &str, value: Range<usize>) -> Range<usize> {
         let inner = content.get(1..).unwrap_or_default();
         let start = value.start.saturating_add(1);
         return match closing_quote(inner, quote) {
-            Some(end) => start..start.saturating_add(end),
+            Some(end) => {
+                let after = inner.get(end.saturating_add(1)..).unwrap_or_default();
+                if after
+                    .chars()
+                    .all(|character| matches!(character, ',' | ';' | '}' | ']' | ')'))
+                {
+                    start..start.saturating_add(end)
+                } else {
+                    value
+                }
+            }
             None => start..value.end,
         };
     }
-    let kept = content.trim_end_matches([',', ';']);
-    let kept = match kept.chars().next_back() {
-        Some(quote @ ('\'' | '`' | '"')) if kept.matches(quote).count() % 2 == 1 => {
-            kept.get(..kept.len().saturating_sub(1)).unwrap_or(kept)
+    let before_separators = content.trim_end_matches([',', ';']);
+    match before_separators.chars().next_back() {
+        Some(quote @ ('\'' | '`' | '"')) if before_separators.matches(quote).count() % 2 == 1 => {
+            value.start
+                ..value
+                    .start
+                    .saturating_add(before_separators.len().saturating_sub(1))
         }
-        _ => kept,
-    };
-    value.start..value.start.saturating_add(kept.len())
+        _ => value,
+    }
 }
 
 /// A header whose value is a credential.
@@ -794,10 +922,13 @@ fn credential_header(name: &str) -> Option<CredentialHeader> {
 /// follows it on the same line: the scheme stays visible. After a `Bearer`
 /// scheme the token that follows is masked; after any other scheme, such as
 /// `Basic` or `Digest`, everything after the scheme to the end of its line
-/// is. When the next word is not a scheme, it is masked, and so is the token
-/// after it when one follows, on the same line or a later one. So
+/// is. When the next word is not a scheme, as in `AWS4-HMAC-SHA256` or a
+/// bare credential, everything from it to the end of its line is masked, and
+/// so is the next token when it starts a later line. So
 /// `Authorization: Bearer: value` masks both, and so does
-/// `Authorization: Bearer` with `value` on the next line.
+/// `Authorization: Bearer` with `value` on the next line. A query parameter
+/// such as `?authorization=Bearer` is left to the pair rules unless another
+/// token follows it on the same line, as in `?authorization=Bearer tok`.
 ///
 /// A value masked to the end of its line moves `line_masked_to` to its end,
 /// and a later one that would start before it is already inside it and is
@@ -809,7 +940,14 @@ fn header_credentials(
     line_breaks: &[usize],
     line_masked_to: &mut usize,
 ) -> Vec<Range<usize>> {
-    let Some((header, before_name, word, word_token)) = header_word(text, tokens, index) else {
+    let Some(HeaderWord {
+        header,
+        before_name,
+        word,
+        word_token,
+        query,
+    }) = header_word(text, tokens, index)
+    else {
         return Vec::new();
     };
     let word = unquoted(text, word);
@@ -819,6 +957,10 @@ fn header_credentials(
             .get(word.end..follow.start)
             .is_some_and(|gap| gap.contains(is_line_break))
     });
+    if query && !follows_on_the_same_line {
+        // The pair rules already mask the whole query value.
+        return Vec::new();
+    }
     let word_text = text.get(word.clone()).unwrap_or_default();
     let scheme = follows_on_the_same_line
         && word_text
@@ -844,8 +986,10 @@ fn header_credentials(
             }
         }
         CredentialHeader::Authorization => {
-            credentials.push(word);
-            credentials.extend(follow);
+            credentials.extend(rest_of_line(word.start));
+            if !follows_on_the_same_line {
+                credentials.extend(follow);
+            }
         }
     }
     if let Some(last) = credentials.pop() {
@@ -875,7 +1019,7 @@ fn header_word<'text>(
     text: &'text str,
     tokens: &[Range<usize>],
     index: usize,
-) -> Option<(CredentialHeader, &'text str, Range<usize>, usize)> {
+) -> Option<HeaderWord<'text>> {
     let token = tokens.get(index)?;
     let current = text.get(token.clone())?;
     let named_separator = current.char_indices().find_map(|(position, _)| {
@@ -883,32 +1027,38 @@ fn header_word<'text>(
         let name = strip_closing_quote(current.get(..position)?);
         let name_start = trailing_key_start(name);
         let introducer = name.get(..name_start)?.chars().next_back();
-        if !matches!(separator, Separator::Colon) && matches!(introducer, Some('?' | '&')) {
-            // A query parameter: the pair rules mask its whole value.
-            return None;
-        }
+        let query = !matches!(separator, Separator::Colon) && matches!(introducer, Some('?' | '&'));
         let header = credential_header(name.get(name_start..)?)?;
         Some((
             header,
             name_start,
             token.start.saturating_add(position),
             separator_len,
+            query,
         ))
     });
-    let (header, name_start, separator, separator_len, separator_token) = match named_separator {
-        Some((header, name_start, separator, separator_len)) => {
-            (header, name_start, separator, separator_len, index)
-        }
-        None => {
-            let name = strip_closing_quote(current);
-            let name_start = trailing_key_start(name);
-            let header = credential_header(name.get(name_start..)?)?;
-            let next_index = index.saturating_add(1);
-            let next = tokens.get(next_index)?;
-            let (_, separator_len) = leading_separator(text.get(next.clone())?)?;
-            (header, name_start, next.start, separator_len, next_index)
-        }
-    };
+    let (header, name_start, separator, separator_len, separator_token, query) =
+        match named_separator {
+            Some((header, name_start, separator, separator_len, query)) => {
+                (header, name_start, separator, separator_len, index, query)
+            }
+            None => {
+                let name = strip_closing_quote(current);
+                let name_start = trailing_key_start(name);
+                let header = credential_header(name.get(name_start..)?)?;
+                let next_index = index.saturating_add(1);
+                let next = tokens.get(next_index)?;
+                let (_, separator_len) = leading_separator(text.get(next.clone())?)?;
+                (
+                    header,
+                    name_start,
+                    next.start,
+                    separator_len,
+                    next_index,
+                    false,
+                )
+            }
+        };
     let separator_end = tokens.get(separator_token)?.end;
     let word_start = separator.saturating_add(separator_len);
     let (word, word_token) = if word_start < separator_end {
@@ -917,7 +1067,27 @@ fn header_word<'text>(
         let word_token = separator_token.saturating_add(1);
         (tokens.get(word_token)?.clone(), word_token)
     };
-    Some((header, current.get(..name_start)?, word, word_token))
+    Some(HeaderWord {
+        header,
+        before_name: current.get(..name_start)?,
+        word,
+        word_token,
+        query,
+    })
+}
+
+/// The word after a credential header name, found by [`header_word`].
+struct HeaderWord<'text> {
+    header: CredentialHeader,
+    /// The text of the name's token before the name.
+    before_name: &'text str,
+    /// The range of the word after the separator.
+    word: Range<usize>,
+    /// The index of the token that the word ends.
+    word_token: usize,
+    /// Whether the name is a query parameter (`?authorization=`), whose
+    /// value the pair rules mask.
+    query: bool,
 }
 
 pub(super) fn is_authorization_name(name: &str) -> bool {
@@ -932,14 +1102,16 @@ pub(super) fn is_authorization_name(name: &str) -> bool {
 /// information before its last `@` is masked, keeping a username before a
 /// `:` visible. When it holds none, the authority may have been cut, as in
 /// `https://u:p/w@host` for a password holding a `/`: if the whitespace
-/// token holds exactly one `@` after the `//`, everything between them is
-/// masked, which over-masks a URL with an `@` in its path rather than leave
-/// a password in clear.
+/// token holds exactly one `@` after the `//` and a `:` comes between them,
+/// everything between them is masked. That over-masks a URL with a port
+/// and an `@` in its path rather than leave a password in clear, while
+/// `medium.com/@user` and `?email=a@b.com` stay readable.
 ///
 /// The `//`s are visited in order with cursors that only move forward, so
 /// the work is linear in the length of the text.
 fn mask_authority_user_info(text: &str, tokens: &[Range<usize>], masks: &mut Vec<Range<usize>>) {
     let mut next_at = NextByte::new(text, b"@");
+    let mut next_colon = NextByte::new(text, b":");
     let mut token_index = 0;
     let mut last_at_in_token: Option<(usize, Option<usize>)> = None;
     for (slashes, _) in text.match_indices("//") {
@@ -971,7 +1143,7 @@ fn mask_authority_user_info(text: &str, tokens: &[Range<usize>], masks: &mut Vec
             continue;
         };
         let first_at = next_at.at_or_after(start);
-        if first_at >= token.end || first_at == start {
+        if first_at >= token.end || first_at == start || next_colon.at_or_after(start) > first_at {
             continue;
         }
         let last_at = match last_at_in_token {

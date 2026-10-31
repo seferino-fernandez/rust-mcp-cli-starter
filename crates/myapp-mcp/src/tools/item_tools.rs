@@ -337,7 +337,9 @@ mod tests {
             structured,
             json!({
                 "id": 42,
-                "name": r#"apikey=******** {"password":"********","token":"********"} https://user:********@tracker.example/passkey/********/announce key ********"#,
+                // A quoted value followed by more text is masked whole, so
+                // the compact object's second pair goes with the first.
+                "name": r#"apikey=******** {"password":********} https://user:********@tracker.example/passkey/********/announce key ********"#,
                 "enabled": true
             })
         );

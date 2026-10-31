@@ -2,8 +2,8 @@
 //!
 //! [`Redacted`] is the only way to build presentable output: its constructor
 //! serializes a value once and masks every credential it can find in it.
-//! Values under credential-like keys, the user information of `http` and
-//! `https` URLs, and credentials in free text all become
+//! String values under credential-like keys, the user information after a
+//! `//`, and credentials in free text all become
 //! [`MASKED_VALUE`](crate::secret::MASKED_VALUE).
 //! [`redact_text`](crate::redact::redact_text) applies the free-text rules to
 //! one string, and [`ApiClient::redact`] also masks the exact secrets the
@@ -66,8 +66,10 @@ pub struct Redacted<T> {
 impl<T: Serialize> Redacted<T> {
     /// Serializes `data` once and redacts the result once.
     ///
-    /// A non-string value under a credential-like key becomes the string
-    /// [`MASKED_VALUE`]; the result is never decoded back into `T`.
+    /// Only strings are masked, so every value keeps its JSON type and the
+    /// output still matches `T`'s schema: a number, boolean or null under a
+    /// credential-like key is left as it is. The result is never decoded
+    /// back into `T`.
     ///
     /// # Errors
     ///
@@ -165,7 +167,7 @@ pub fn redact_text(text: &str) -> Cow<'_, str> {
 }
 
 /// The sensitive keys, in lower case.
-const SENSITIVE_KEYS: [&str; 13] = [
+const SENSITIVE_KEYS: [&str; 17] = [
     "apikey",
     "api_key",
     "apitoken",
@@ -179,7 +181,15 @@ const SENSITIVE_KEYS: [&str; 13] = [
     "privatekey",
     "credential",
     "cookie",
+    "accesskey",
+    "passphrase",
+    "passwd",
+    "pwd",
 ];
+
+/// The sensitive key that never matches with an `s` added: `tokens` is
+/// nearly always a count, as in `maxTokens`.
+const COUNTED_KEY: &str = "token";
 
 /// The length of the longest of the [`SENSITIVE_KEYS`].
 const LONGEST_SENSITIVE_KEY: usize = {
@@ -220,10 +230,12 @@ fn is_sensitive_object_key(key: &str) -> bool {
 /// is followed by an upper-case one, or an upper-case letter is followed by
 /// an upper-case one and then a lower-case one. The name matches when its
 /// parts, or some trailing run of them, joined, are a sensitive key or a
-/// sensitive key followed by `s`, compared in any case. So `X-Api-Key`,
-/// `apiKey` and `apiKeys` name `apikey`, and `access_token`, `X-Auth-Token`,
-/// `accessToken` and `sessionToken` end in `token`, but `mytoken` and
-/// `authtoken` have no part boundary before `token`.
+/// sensitive key other than `token` followed by `s`, compared in any case.
+/// So `X-Api-Key`, `apiKey` and `apiKeys` name `apikey`,
+/// `AWS_SECRET_ACCESS_KEY` ends in `accesskey`, and `access_token`,
+/// `X-Auth-Token`, `accessToken` and `sessionToken` end in `token`, but
+/// `maxTokens` does not, and `mytoken` and `authtoken` have no part boundary
+/// before `token`.
 ///
 /// The name is read backwards, without `-` and `_`, into a buffer one byte
 /// longer than the longest sensitive key, and each trailing run that starts
@@ -276,7 +288,8 @@ fn starts_part(bytes: &[u8], index: usize) -> bool {
 }
 
 /// Whether `run`, a key without `-` and `_`, is a sensitive key or a
-/// sensitive key followed by `s`, compared in any case.
+/// sensitive key other than [`COUNTED_KEY`] followed by `s`, compared in any
+/// case.
 fn is_sensitive_run(run: &[u8]) -> bool {
     let singular = match run.split_last() {
         Some((last, rest)) if last.eq_ignore_ascii_case(&b's') => Some(rest),
@@ -284,8 +297,10 @@ fn is_sensitive_run(run: &[u8]) -> bool {
     };
     SENSITIVE_KEYS.iter().any(|sensitive| {
         let sensitive = sensitive.as_bytes();
+        let plural_allowed = !sensitive.eq_ignore_ascii_case(COUNTED_KEY.as_bytes());
         sensitive.eq_ignore_ascii_case(run)
-            || singular.is_some_and(|singular| sensitive.eq_ignore_ascii_case(singular))
+            || (plural_allowed
+                && singular.is_some_and(|singular| sensitive.eq_ignore_ascii_case(singular)))
     })
 }
 
@@ -413,13 +428,110 @@ mod tests {
     }
 
     #[test]
-    fn redacted_new_masks_an_array_under_a_plural_sensitive_key() {
-        let data = serde_json::json!({ "apiKeys": ["a", "b"], "tokens": { "x": "y" } });
+    fn redacted_new_masks_every_string_inside_a_sensitive_array_or_object() {
+        let data = serde_json::json!({
+            "apiKeys": ["a", "b", 3, true, null],
+            "secrets": { "first": "S", "count": 2, "nested": ["S", { "deep": "S" }] }
+        });
 
         assert_eq!(
             redacted_value(&data),
-            serde_json::json!({ "apiKeys": MASKED_VALUE, "tokens": MASKED_VALUE })
+            serde_json::json!({
+                "apiKeys": [MASKED_VALUE, MASKED_VALUE, 3, true, null],
+                "secrets": {
+                    "first": MASKED_VALUE,
+                    "count": 2,
+                    "nested": [MASKED_VALUE, { "deep": MASKED_VALUE }]
+                }
+            })
         );
+    }
+
+    #[test]
+    fn redacted_new_never_changes_a_non_string_value_under_a_sensitive_key() {
+        let data = serde_json::json!({
+            "maxTokens": 4096,
+            "totalTokens": 12,
+            "numTokens": 0,
+            "tokens": 5,
+            "token": 7,
+            "hasPassword": true,
+            "isSecret": false,
+            "requiresApiKey": true,
+            "apiKey": null,
+            "password": 1.5
+        });
+
+        assert_eq!(redacted_value(&data), data);
+    }
+
+    #[test]
+    fn redacted_output_still_decodes_as_its_type() {
+        #[derive(Debug, PartialEq, Serialize, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Usage {
+            max_tokens: u32,
+            total_tokens: u64,
+            num_tokens: i32,
+            has_password: bool,
+            is_secret: bool,
+            requires_api_key: bool,
+            token: Option<u32>,
+            api_key: String,
+            secrets: Vec<String>,
+        }
+
+        let usage = Usage {
+            max_tokens: 4096,
+            total_tokens: 12,
+            num_tokens: 3,
+            has_password: true,
+            is_secret: false,
+            requires_api_key: true,
+            token: Some(9),
+            api_key: SENTINEL.to_string(),
+            secrets: vec![SENTINEL.to_string()],
+        };
+
+        let redacted = Redacted::new(&usage).expect("redaction succeeds");
+        let decoded: Usage =
+            serde_json::from_value(redacted.as_value().clone()).expect("output keeps its type");
+
+        assert_eq!(
+            decoded,
+            Usage {
+                api_key: MASKED_VALUE.to_string(),
+                secrets: vec![MASKED_VALUE.to_string()],
+                ..usage
+            }
+        );
+    }
+
+    #[test]
+    fn aws_style_compound_keys_are_sensitive() {
+        for key in [
+            "aws_secret_access_key",
+            "AWS_SECRET_ACCESS_KEY",
+            "accessKey",
+            "passphrase",
+            "db_passwd",
+            "PWD",
+        ] {
+            let data = serde_json::json!({ key: SENTINEL });
+            assert_eq!(
+                redacted_value(&data),
+                serde_json::json!({ key: MASKED_VALUE }),
+                "{key}"
+            );
+        }
+        let text = format!("AWS_SECRET_ACCESS_KEY={SENTINEL} passphrase: {SENTINEL}");
+        assert_eq!(
+            redact_text(&text),
+            "AWS_SECRET_ACCESS_KEY=******** passphrase: ********"
+        );
+        for visible in ["key=v", "pass=v", "auth=v", "aws_access_key_id=v"] {
+            assert_eq!(redact_text(visible), visible);
+        }
     }
 
     #[test]
@@ -470,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn redacted_new_masks_a_non_string_sensitive_value() {
+    fn redacted_new_keeps_a_non_string_sensitive_value() {
         #[derive(Serialize)]
         struct Probe {
             token: u32,
@@ -480,7 +592,7 @@ mod tests {
 
         assert_eq!(
             serde_json::to_string(&redacted).expect("redacted data serializes"),
-            r#"{"token":"********"}"#
+            r#"{"token":7}"#
         );
     }
 
@@ -625,6 +737,9 @@ mod tests {
         let separators = "a=".repeat(32_768);
         let camel_words = "aBcDeF".repeat(10_922);
         let colons = "aXy:".repeat(16_384);
+        let encoded_queries = "q=1%26a%3D".repeat(6_553);
+        let encoded_urls = "u=https%3A%2F%2Fh%2F ".repeat(3_120);
+        let at_paths = "https://h/@a ".repeat(5_041);
 
         for (name, input) in [
             ("A: 16 spaced 4 KiB URLs", spaced_long_urls),
@@ -636,6 +751,9 @@ mod tests {
             ("G: 64 KiB of = separators", separators),
             ("H: 64 KiB of camelCase", camel_words),
             ("I: 64 KiB of colon-separated names", colons),
+            ("I1: 64 KiB of encoded query pairs", encoded_queries),
+            ("I2: 64 KiB of encoded URLs", encoded_urls),
+            ("I3: 64 KiB of @ paths without a colon", at_paths),
         ] {
             let elapsed = time_free_text_rules(&input);
             eprintln!("{name}: {} bytes in {elapsed:?}", input.len());
@@ -657,6 +775,10 @@ mod tests {
         let double_quoted_token_keys = "\"token\":\"".repeat(7_281);
         let percent_separated = "api%5Fkey%3D".repeat(5_461);
         let camel_keys = "accessToken=x ".repeat(4_681);
+        let nested_encoded = "?url=https%3A%2F%2Fh%2Fdl%3Fapikey%3Dtok_1 ".repeat(1_489);
+        let encoded_user_info = "url=https%3A%2F%2Fu%3Atok_2%40h ".repeat(2_048);
+        let glued_encoded = "%3Ftoken%3Dt".repeat(5_461);
+        let aws_headers = "Authorization: AWS4-HMAC-SHA256 ".repeat(1_985);
 
         for (name, input) in [
             ("K: 64 KiB of // before one @", slashes_before_one_at),
@@ -673,6 +795,10 @@ mod tests {
             ),
             ("Q: 64 KiB of percent-encoded pairs", percent_separated),
             ("R: 64 KiB of camelCase pairs", camel_keys),
+            ("S: 64 KiB of nested encoded URLs", nested_encoded),
+            ("T: 64 KiB of encoded user information", encoded_user_info),
+            ("U: 64 KiB of one glued encoded token", glued_encoded),
+            ("V: 64 KiB of AWS signature headers", aws_headers),
         ] {
             let start = Instant::now();
             let redacted = redact_text(&input);
@@ -1450,9 +1576,9 @@ mod tests {
             "Authorization: Negotiate ********",
         ),
         (
-            "authorization_word_that_is_not_only_letters_is_masked_with_the_token_after_it",
+            "authorization_word_that_is_not_only_letters_is_masked_to_the_end_of_the_line",
             "Authorization: Bearer: SECRET",
-            "Authorization: ******** ********",
+            "Authorization: ********",
         ),
         (
             "proxy_authorization_scheme_is_kept_and_the_credential_masked",
@@ -1703,6 +1829,101 @@ mod tests {
             "prefilter_passes_url_user_info",
             "https://u:p@h",
             "https://u:********@h",
+        ),
+        (
+            "nested_encoded_url_query_value_is_masked",
+            "https://r.example/go?url=https%3A%2F%2Fh%2Fdl%3Fapikey%3Dtok_1",
+            "https://r.example/go?url=https%3A%2F%2Fh%2Fdl%3Fapikey%3D********",
+        ),
+        (
+            "encoded_relative_redirect_query_value_is_masked",
+            "next=%2Fx%3Ftoken%3Dtok_3",
+            "next=%2Fx%3Ftoken%3D********",
+        ),
+        (
+            "encoded_ampersand_pair_is_masked",
+            "q=1%26apikey%3Dtok_25",
+            "q=1%26apikey%3D********",
+        ),
+        (
+            "encoded_url_user_info_is_masked",
+            "url=https%3A%2F%2Fu%3Atok_2%40h",
+            "url=https%3A%2F%2Fu%3A********%40h",
+        ),
+        (
+            "encoded_bearer_credential_in_an_encoded_query_is_masked",
+            "next=%2Fcb%3Fauthorization%3DBearer%2520tok_9",
+            "next=%2Fcb%3Fauthorization%3D********",
+        ),
+        (
+            "hex_digits_of_an_escape_never_join_the_next_key",
+            "x%3Fapikey=tok_5",
+            "x%3Fapikey=********",
+        ),
+        (
+            "quoted_value_followed_by_more_text_is_masked_whole",
+            "token='abc'def",
+            "token=********",
+        ),
+        (
+            "quoted_value_before_closers_keeps_its_quotes",
+            "\"token\"=\"abc\";",
+            "\"token\"=\"********\";",
+        ),
+        (
+            "trailing_separators_stay_inside_an_unquoted_value",
+            "token: abc,; next",
+            "token: ******** next",
+        ),
+        (
+            "query_authorization_with_a_spaced_bearer_token_is_masked",
+            "https://h/x?authorization=Bearer tok_7 done",
+            "https://h/x?authorization=******** ******** done",
+        ),
+        (
+            "query_authorization_with_another_spaced_scheme_masks_the_line",
+            "GET /x?a=1&authorization=Basic dXNlcg== trailing\nnext",
+            "GET /x?a=1&authorization=******** ********\nnext",
+        ),
+        (
+            "aws_signature_scheme_masks_the_whole_line",
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, SignedHeaders=host, Signature=tok_4",
+            "Authorization: ********",
+        ),
+        (
+            "bare_authorization_credential_masks_the_line",
+            "Authorization: tok_8 sent by client",
+            "Authorization: ********",
+        ),
+        (
+            "medium_style_at_path_stays_readable",
+            "https://medium.com/@user/post",
+            "https://medium.com/@user/post",
+        ),
+        (
+            "mastodon_style_at_path_stays_readable",
+            "see https://mastodon.social/@alice for news",
+            "see https://mastodon.social/@alice for news",
+        ),
+        (
+            "file_url_with_an_at_segment_stays_readable",
+            "file:///home/user/@file",
+            "file:///home/user/@file",
+        ),
+        (
+            "email_query_value_stays_readable",
+            "https://h/x?email=a@b.com",
+            "https://h/x?email=a@b.com",
+        ),
+        (
+            "aws_secret_access_key_pair_is_masked",
+            "aws_secret_access_key=tok_6 AWS_SECRET_ACCESS_KEY: tok_6",
+            "aws_secret_access_key=******** AWS_SECRET_ACCESS_KEY: ********",
+        ),
+        (
+            "token_counts_stay_readable",
+            "maxTokens=4096 tokens: 12",
+            "maxTokens=4096 tokens: 12",
         ),
         (
             "camel_case_key_in_a_pair_is_masked",
