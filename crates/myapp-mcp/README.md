@@ -191,11 +191,14 @@ Every call goes through the same checks, in order:
    1 MiB). A larger result is replaced by a small `response_too_large` error;
    if even that cannot fit, the call fails with a protocol error.
 
-Every result is `Json<Redacted<T>>`, built by `ApiClient::redact`: values
-under secret-named keys, secret query values and path segments, URL user
-information, `Authorization` credentials, JSON embedded in strings, and the
-configured API key itself become `********`, and the output schema stays
-`T`'s. A failing call answers a tool error holding only the core error's
+Every result is `Json<Redacted<T>>`, built by `ApiClient::redact`, and the
+output schema stays `T`'s. It masks the credential forms listed in the
+[`myapp-core` README](../myapp-core/README.md#redaction) (sensitive keys and
+the values under them, secret pairs, query values and path segments, URL user
+information, `Authorization` and `Cookie` header values, JSON embedded in
+strings, object keys) and the configured API key itself. Redaction is
+pattern-based, so a secret in a shape it does not recognize reaches the
+model. A failing call answers a tool error holding only the core error's
 public message (a 404 adds a hint to use the list tool), never the upstream
 body, the request URL, or decoder detail.
 

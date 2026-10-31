@@ -154,9 +154,11 @@ Tool names carry a `myapp_` prefix. Tool input schemas are closed
 (`additionalProperties: false`) and unknown arguments are refused, tool results
 are capped to a configurable byte budget, OAuth tokens without the `write`
 scope may call only read-only tools, and destructive tools ask capable clients
-for confirmation (`confirm_destructive`). Tool results are redacted
-(`Redacted<T>`) so credentials and the API key never reach the model, and
-both the CLI and the MCP server show errors only through
+for confirmation (`confirm_destructive`). Tool results pass through
+`Redacted<T>`, which masks the credential forms listed in the
+[`myapp-core` README](crates/myapp-core/README.md#redaction) and the configured API key;
+it is pattern-based, so a secret in a shape it does not recognize is not
+masked. Both the CLI and the MCP server show errors only through
 `Error::public_message()`, never an upstream body or URL. See the
 [`myapp-mcp` README](crates/myapp-mcp/README.md) for details.
 
