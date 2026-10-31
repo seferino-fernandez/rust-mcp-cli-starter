@@ -4,8 +4,12 @@
 //! Every struct denies unknown fields, so a misspelled argument fails the call
 //! instead of silently falling back to a default.
 
+use rmcp::ErrorData;
+use rmcp::handler::server::tool::parse_json_object;
+use rmcp::model::{CallToolResult, ContentBlock, JsonObject};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 /// Parameters for `myapp_list_items`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -56,6 +60,42 @@ pub struct CreateItemParams {
     pub enabled: bool,
 }
 
+/// Decodes a tool call's arguments as its params type, exactly as rmcp does
+/// when the tool runs, returning rmcp's own error on failure.
+type ParamsCheck = fn(JsonObject) -> Result<(), ErrorData>;
+
+fn decodes_as<T: DeserializeOwned>(arguments: JsonObject) -> Result<(), ErrorData> {
+    parse_json_object::<T>(arguments).map(drop)
+}
+
+/// The params check of each tool that asks for confirmation and takes
+/// params, by tool name.
+///
+/// rmcp decodes params only when the tool runs, after the confirmation
+/// prompt, so without this check a mistyped argument would ask the user to
+/// confirm a call that then fails. A schema test fails when a confirming tool
+/// with params is missing here.
+fn params_check(tool_name: &str) -> Option<ParamsCheck> {
+    match tool_name {
+        "myapp_delete_item" => Some(decodes_as::<ItemIdParams>),
+        _ => None,
+    }
+}
+
+/// Rejects a call whose arguments do not decode as the tool's params type,
+/// for the tools [`params_check`] covers, with the same tool error rmcp
+/// returns once the tool runs.
+pub(super) fn params_rejection(
+    tool_name: &str,
+    arguments: Option<&JsonObject>,
+) -> Option<CallToolResult> {
+    let check = params_check(tool_name)?;
+    let error = check(arguments.cloned().unwrap_or_default()).err()?;
+    Some(CallToolResult::error(vec![ContentBlock::text(
+        error.message,
+    )]))
+}
+
 /// Decodes a free-form JSON request body (a `body: serde_json::Value`
 /// parameter) into `T`, without including submitted content in the error.
 ///
@@ -70,7 +110,7 @@ pub struct CreateItemParams {
         reason = "template helper for tools in generated projects that take a JSON body"
     )
 )]
-pub(crate) fn decode_body<T: serde::de::DeserializeOwned>(
+pub(crate) fn decode_body<T: DeserializeOwned>(
     value: serde_json::Value,
     parameter: &str,
     model: &str,
@@ -80,7 +120,13 @@ pub(crate) fn decode_body<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
-    use super::{CreateItemParams, ItemIdParams, ListItemsParams, decode_body};
+    use super::{
+        CreateItemParams, ItemIdParams, ListItemsParams, decode_body, params_check,
+        params_rejection,
+    };
+    use crate::tools::confirm::requires_confirmation;
+    use crate::tools::test_support::tools_at;
+    use myapp_core::Config;
     use schemars::schema_for;
     use serde_json::json;
 
@@ -125,5 +171,55 @@ mod tests {
         assert_eq!(props["page"]["minimum"], serde_json::json!(1));
         assert_eq!(props["page_size"]["minimum"], serde_json::json!(1));
         assert_eq!(props["page_size"]["maximum"], serde_json::json!(1000));
+    }
+
+    /// Every tool that asks for confirmation and takes params has a params
+    /// check, and every check names such a tool.
+    #[test]
+    fn every_confirming_tool_with_params_has_a_params_check() {
+        let tools = tools_at(Config::default().base_url, 1024)
+            .router()
+            .list_all();
+        let mut checked = 0;
+        for tool in &tools {
+            let takes_params = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|properties| !properties.is_empty());
+            let has_check = params_check(&tool.name).is_some();
+            assert_eq!(
+                has_check,
+                requires_confirmation(tool) && takes_params,
+                "{}",
+                tool.name
+            );
+            checked += usize::from(has_check);
+        }
+        assert_eq!(checked, 1, "myapp_delete_item is checked");
+    }
+
+    #[test]
+    fn params_rejection_matches_rmcp_and_passes_valid_arguments() {
+        let object = |value: serde_json::Value| value.as_object().cloned().unwrap();
+        let rejection = params_rejection("myapp_delete_item", Some(&object(json!({ "id": "x" }))))
+            .expect("a mistyped id is rejected");
+        assert_eq!(rejection.is_error, Some(true));
+        let text = rejection
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.clone())
+            .unwrap_or_default();
+        assert!(
+            text.starts_with("failed to deserialize parameters: invalid type"),
+            "{text}"
+        );
+        assert!(
+            params_rejection("myapp_delete_item", None).is_some(),
+            "id is required"
+        );
+        assert!(params_rejection("myapp_delete_item", Some(&object(json!({ "id": 7 })))).is_none());
+        assert!(params_rejection("myapp_get_item", Some(&object(json!({ "id": "x" })))).is_none());
     }
 }

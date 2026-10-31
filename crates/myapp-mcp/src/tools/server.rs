@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 
 use super::handler::AppTools;
 use super::schema::{close_object_map, enforce_response_budget};
-use super::{confirm, scope};
+use super::{confirm, params, scope};
 
 /// Hardens a tool's advertised schemas in place: closes the input schema and,
 /// when present, the output schema (sets `additionalProperties: false` and an
@@ -102,9 +102,10 @@ impl ServerHandler for AppTools {
     }
 
     /// Runs a tool call through, in order: the OAuth scope check, the
-    /// argument check, destructive-tool confirmation, the tool itself and the
-    /// response budget. An unknown tool name skips the checks and gets the
-    /// router's own error.
+    /// argument check, destructive-tool confirmation (after decoding the
+    /// params, so a mistyped argument fails before the user is asked), the
+    /// tool itself and the response budget. An unknown tool name skips the
+    /// checks and gets the router's own error.
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -123,6 +124,11 @@ impl ServerHandler for AppTools {
                 && confirm::requires_confirmation(tool)
                 && confirm::client_supports_confirmation(&context)
             {
+                if let Some(rejection) =
+                    params::params_rejection(&request.name, request.arguments.as_ref())
+                {
+                    return Ok(rejection.into());
+                }
                 match request.request_state.as_deref() {
                     None => return Ok(confirm::confirmation_request(&request)?.into()),
                     Some(sealed) => {
@@ -664,6 +670,34 @@ mod tests {
         }
 
         assert_eq!(request_count(&server).await, 1);
+    }
+
+    /// The params are decoded before the prompt, so a mistyped argument fails
+    /// as rmcp would fail it, without asking the user or calling upstream.
+    #[tokio::test]
+    async fn mistyped_params_fail_before_the_confirmation_prompt() {
+        let server = untouched_upstream().await;
+        let tools = tools_for(&server);
+
+        for arguments in [json!({ "id": "x" }), json!({})] {
+            let response = call_in(
+                &tools,
+                "myapp_delete_item",
+                arguments.clone(),
+                confirmable(context(&tools, Caller::Stdio)),
+            )
+            .await
+            .expect("tools/call is answered");
+            let CallToolResponse::Complete(result) = response else {
+                panic!("{arguments}: expected a tool error, not {response:?}");
+            };
+            assert_eq!(result.is_error, Some(true), "{arguments}: {result:?}");
+            assert!(
+                first_text(&result).starts_with("failed to deserialize parameters: "),
+                "{arguments}: {result:?}"
+            );
+        }
+        assert_no_requests(&server).await;
     }
 
     #[tokio::test]
