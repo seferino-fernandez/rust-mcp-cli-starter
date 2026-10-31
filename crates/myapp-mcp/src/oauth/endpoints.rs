@@ -29,7 +29,7 @@ const MAX_REDIRECT_URIS: usize = 10;
 /// The longest redirect URI a client may register, in bytes.
 const MAX_REDIRECT_URI_BYTES: usize = 2048;
 /// The longest `state` `/oauth/authorize` accepts, in bytes.
-const MAX_STATE_BYTES: usize = 512;
+const MAX_STATE_BYTES: usize = 2048;
 /// The length range of a PKCE code challenge (RFC 7636 §4.2).
 const CODE_CHALLENGE_CHARS: std::ops::RangeInclusive<usize> = 43..=128;
 
@@ -85,9 +85,9 @@ pub async fn authorization_server_metadata(
 /// A query that does not deserialize, such as one missing `response_type`,
 /// `client_id` or `redirect_uri`, is a JSON 400 that does not echo it.
 /// `state` is limited to [`MAX_STATE_BYTES`], and `code_challenge` must be
-/// 43 to 128 characters of the PKCE unreserved set (RFC 7636 §4.2). Past
-/// [`MAX_PENDING_AUTHORIZATIONS`](super::store::MAX_PENDING_AUTHORIZATIONS)
-/// held requests, a new one gets a JSON 429.
+/// 43 to 128 characters of the PKCE unreserved set (RFC 7636 §4.2). A valid
+/// request is always held: past the store's caps it evicts an older one (see
+/// [`OAuthStore::begin_authorization`](super::store::OAuthStore::begin_authorization)).
 ///
 /// Of the requested scopes only `read` and `write` are kept, and `read` is
 /// granted when none are left.
@@ -185,20 +185,9 @@ pub async fn authorize(
         code_challenge_method,
         state: params.state,
     };
-    let html_pending = pending.clone();
-    let Some(consent_nonce) = state.store.begin_authorization(pending) else {
-        tracing::warn!("Authorization refused: too many pending authorizations");
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({
-                "error": "temporarily_unavailable",
-                "error_description": "Too many pending authorization requests; retry later"
-            })),
-        )
-            .into_response();
-    };
+    let consent_nonce = state.store.begin_authorization(pending.clone());
     let html = render_consent(
-        &html_pending,
+        &pending,
         client.client_name.as_deref(),
         &consent_nonce,
         state.oauth_pin.is_some(),

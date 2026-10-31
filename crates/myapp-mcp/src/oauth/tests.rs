@@ -1533,7 +1533,7 @@ async fn authorize_accepts_state_and_code_challenge_at_their_limits() {
     let client_id = register_client(&app, "http://localhost/cb").await;
     let unreserved = "AZaz09-._~";
     for (challenge, state) in [
-        ("a".repeat(43), "s".repeat(512)),
+        ("a".repeat(43), "s".repeat(2048)),
         ("a".repeat(128), String::new()),
         (format!("{unreserved}{}", "b".repeat(33)), "s".to_string()),
     ] {
@@ -1553,7 +1553,7 @@ async fn authorize_refuses_an_oversized_state_or_malformed_code_challenge() {
     let client_id = register_client(&app, "http://localhost/cb").await;
     let valid = "a".repeat(43);
     let cases = [
-        (valid, "s".repeat(513), "state"),
+        (valid, "s".repeat(2049), "state"),
         ("a".repeat(42), "s".to_string(), "code_challenge"),
         ("a".repeat(129), "s".to_string(), "code_challenge"),
         (
@@ -1585,8 +1585,59 @@ async fn authorize_refuses_an_oversized_state_or_malformed_code_challenge() {
     }
 }
 
+/// Asserts `GET /oauth/authorize` for `client_id` renders a consent page, and
+/// returns its nonce.
+async fn authorize_ok(app: &Router, client_id: &str) -> String {
+    let challenge = pkce::challenge_from_verifier("verifier");
+    let response = authorize_with(app, client_id, &challenge, "s").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    consent_nonce(&body_to_string(response.into_body()).await)
+}
+
+/// Past the per-client cap `/oauth/authorize` still succeeds, evicting that
+/// client's oldest request, whose nonce is then refused at approve.
 #[tokio::test]
-async fn authorize_past_the_pending_cap_is_429() {
+async fn authorize_past_the_per_client_cap_evicts_that_clients_oldest() {
+    let (app, store) = build_test_router_with(
+        None,
+        PinLimiter::default(),
+        OAuthStoreConfig {
+            max_pending_per_client: 2,
+            ..OAuthStoreConfig::default()
+        },
+    );
+    let flooder = register_client(&app, "http://localhost/cb").await;
+    let victim = register_client(&app, "http://localhost/cb").await;
+    let victim_nonce = authorize_ok(&app, &victim).await;
+    let oldest = authorize_ok(&app, &flooder).await;
+    for _ in 0..5 {
+        authorize_ok(&app, &flooder).await;
+    }
+    let newest = authorize_ok(&app, &flooder).await;
+    assert!(store.holds_authorization(&victim_nonce));
+
+    assert_bad_nonce(
+        post_approve(
+            &app,
+            &[("consent_nonce", oldest.as_str()), ("approved", "true")],
+        )
+        .await,
+    )
+    .await;
+    for nonce in [newest, victim_nonce] {
+        let response = post_approve(
+            &app,
+            &[("consent_nonce", nonce.as_str()), ("approved", "true")],
+        )
+        .await;
+        assert_code_issued(&response);
+    }
+}
+
+/// Past the global cap `/oauth/authorize` still succeeds, evicting the
+/// oldest request of all, whose nonce is then refused at approve.
+#[tokio::test]
+async fn authorize_past_the_global_cap_evicts_the_oldest() {
     let (app, _store) = build_test_router_with(
         None,
         PinLimiter::default(),
@@ -1595,50 +1646,31 @@ async fn authorize_past_the_pending_cap_is_429() {
             ..OAuthStoreConfig::default()
         },
     );
-    let client_id = register_client(&app, "http://localhost/cb").await;
-    let challenge = pkce::challenge_from_verifier("verifier");
-    let first = authorize_nonce(
-        &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "s",
-        &challenge,
-    )
-    .await;
-    authorize_nonce(
-        &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "s",
-        &challenge,
-    )
-    .await;
+    let mut clients = Vec::new();
+    for _ in 0..3 {
+        clients.push(register_client(&app, "http://localhost/cb").await);
+    }
+    let mut nonces = Vec::new();
+    for client_id in &clients {
+        nonces.push(authorize_ok(&app, client_id).await);
+    }
 
-    let response = authorize_with(&app, &client_id, &challenge, "s").await;
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert!(response.headers().get(header::LOCATION).is_none());
-    assert_eq!(
-        response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()),
-        Some("application/json")
-    );
-    let json = body_to_json(response.into_body()).await;
-    assert_eq!(json["error"], "temporarily_unavailable");
-    assert!(json["error_description"].is_string(), "{json}");
-
-    // Spending a nonce makes room again.
-    let response = post_approve(
-        &app,
-        &[("consent_nonce", first.as_str()), ("approved", "false")],
+    assert_bad_nonce(
+        post_approve(
+            &app,
+            &[("consent_nonce", nonces[0].as_str()), ("approved", "true")],
+        )
+        .await,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let response = authorize_with(&app, &client_id, &challenge, "s").await;
-    assert_eq!(response.status(), StatusCode::OK);
+    for nonce in &nonces[1..] {
+        let response = post_approve(
+            &app,
+            &[("consent_nonce", nonce.as_str()), ("approved", "true")],
+        )
+        .await;
+        assert_code_issued(&response);
+    }
 }
 
 /// The consent nonce names only the client; once the client is gone the
