@@ -1,3 +1,7 @@
+//! Streamable HTTP transport: resolves the configured authentication mode,
+//! builds the `/mcp` service and, under OAuth, the authorization-server
+//! routes, then serves them until SIGINT or SIGTERM.
+
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -191,6 +195,13 @@ fn http_tools(config: &ServerConfig, auth: &HttpAuth) -> anyhow::Result<AppTools
     )
 }
 
+/// Serves the MCP server over streamable HTTP on `[mcp] host` and `port`,
+/// with the configured authentication, until SIGINT or SIGTERM.
+///
+/// Fails when the bind address is invalid, the authentication settings are
+/// refused (a blank token, `none` off loopback, or an unsafe OAuth setup or
+/// consent PIN), the API client cannot be built, or the listener cannot
+/// bind.
 pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     let addr = listen_addr(&config.mcp.host, config.mcp.port)?;
     let auth = HttpAuth::resolve(config, &addr)?;

@@ -1,3 +1,5 @@
+//! Static Bearer token authentication for the `/mcp` endpoint.
+
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -10,6 +12,9 @@ use crate::secret_digest::SecretDigest;
 #[derive(Clone, Debug)]
 pub struct StaticAuthToken(pub SecretDigest);
 
+/// Axum middleware that admits a request only when its `Authorization`
+/// header is `Bearer ` followed by the configured token, answering `401`
+/// otherwise.
 pub async fn static_bearer_auth(
     State(expected): State<StaticAuthToken>,
     req: Request<Body>,

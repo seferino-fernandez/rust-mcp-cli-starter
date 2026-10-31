@@ -1,3 +1,7 @@
+//! Axum handlers for the OAuth endpoints: the well-known metadata
+//! documents, `/oauth/authorize`, `/oauth/approve`, `/oauth/token` and
+//! `/oauth/register`.
+
 use axum::http::header;
 use axum::{
     Form, Json,

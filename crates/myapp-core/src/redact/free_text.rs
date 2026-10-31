@@ -1170,6 +1170,7 @@ struct HeaderWord<'text> {
     query: bool,
 }
 
+/// Whether `name` is `Authorization` or `Proxy-Authorization`, in any case.
 pub(super) fn is_authorization_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("Authorization") || name.eq_ignore_ascii_case("Proxy-Authorization")
 }

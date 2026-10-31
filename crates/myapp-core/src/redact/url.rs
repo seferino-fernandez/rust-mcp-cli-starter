@@ -18,6 +18,7 @@ fn starts_with_http_url(value: &str) -> bool {
         || starts_with_ignore_ascii_case(value, "http://")
 }
 
+/// Whether `value` contains `http:` or `https:` anywhere, in any case.
 pub(super) fn contains_http_scheme_marker(value: &str) -> bool {
     value.char_indices().any(|(index, _character)| {
         value.get(index..).is_some_and(|suffix| {
@@ -27,6 +28,8 @@ pub(super) fn contains_http_scheme_marker(value: &str) -> bool {
     })
 }
 
+/// The closing delimiter for an opening bracket or quote, or `None` when
+/// `character` is not one.
 pub(super) const fn matching_delimiter(character: char) -> Option<char> {
     match character {
         '(' => Some(')'),

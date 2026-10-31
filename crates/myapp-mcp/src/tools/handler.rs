@@ -23,6 +23,7 @@ pub struct AppTools(Arc<Inner>);
 /// The state every [`AppTools`] handle shares.
 #[derive(Clone)]
 pub struct Inner {
+    /// The upstream API client every tool calls.
     pub(super) client: ApiClient,
     /// Every tool route, with its input and output schemas already closed.
     pub(super) router: ToolRouter<AppTools>,

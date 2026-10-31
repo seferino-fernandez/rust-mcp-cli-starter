@@ -8,8 +8,8 @@ use clap_complete_nushell::Nushell;
 
 /// Shells a static completion script can be generated for.
 ///
-/// Extends clap_complete's built-in [`Shell`] set with Nushell (via
-/// `clap_complete_nushell`), which clap_complete does not ship.
+/// Extends `clap_complete`'s built-in [`Shell`] set with Nushell (via
+/// `clap_complete_nushell`), which `clap_complete` does not ship.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum CompletionShell {
     Bash,

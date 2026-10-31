@@ -1,3 +1,5 @@
+//! PKCE (RFC 7636) code-challenge verification.
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 
@@ -18,6 +20,7 @@ pub fn verify(method: &str, verifier: &str, challenge: &str) -> bool {
     }
 }
 
+/// The S256 challenge for `verifier`, for building test requests.
 #[cfg(test)]
 pub fn challenge_from_verifier(verifier: &str) -> String {
     let hash = Sha256::digest(verifier.as_bytes());

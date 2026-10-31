@@ -1,6 +1,6 @@
 //! Server configuration: core client config + MCP-specific settings.
 //!
-//! [`ServerConfig`] embeds the core [`Config`](myapp_core::Config) and adds an
+//! [`ServerConfig`] embeds the core [`Config`] and adds an
 //! [`McpConfig`] for the MCP server (HTTP bind + endpoint auth). Both are loaded
 //! from the same `config.toml`: core fields at the top level, MCP fields under
 //! `[mcp]`. Environment overrides use the `MYAPP_MCP_*` prefix, and `*_FILE`

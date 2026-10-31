@@ -3,6 +3,7 @@
 //! Construct an [`ApiClient`] from [`Config`] and call the example endpoint
 //! methods. Replace the example `models`, `api`, and `endpoints` with your own.
 
+#![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 

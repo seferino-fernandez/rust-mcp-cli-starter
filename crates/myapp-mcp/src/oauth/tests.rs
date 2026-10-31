@@ -1,3 +1,5 @@
+//! End-to-end tests of the OAuth routes, driven through an axum router.
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 

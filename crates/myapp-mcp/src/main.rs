@@ -7,6 +7,7 @@
 //! 2.1 with PKCE, a static bearer token, or no authentication at all,
 //! controlled by the `[mcp].auth_mode` config field.
 
+#![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 

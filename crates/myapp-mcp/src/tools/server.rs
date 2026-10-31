@@ -1,3 +1,6 @@
+//! The rmcp [`ServerHandler`] implementation for [`AppTools`]: server info,
+//! tool listing, and the checks every tool call goes through.
+
 use std::sync::Arc;
 
 use rmcp::handler::server::tool::ToolCallContext;

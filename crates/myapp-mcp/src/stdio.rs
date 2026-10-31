@@ -1,3 +1,5 @@
+//! Stdio transport: serves the MCP tools over stdin and stdout.
+
 use rmcp::ServiceExt;
 
 use crate::config::ServerConfig;

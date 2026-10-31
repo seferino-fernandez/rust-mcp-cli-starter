@@ -1,7 +1,7 @@
 //! [`ApiClient`]: a thin authenticated HTTP wrapper.
 //!
 //! Sends the configured API key as the `X-Api-Key` header on every request.
-//! To use bearer auth instead, change [`API_KEY_HEADER`] to `"Authorization"`
+//! To use bearer auth instead, change `API_KEY_HEADER` to `"Authorization"`
 //! and prefix the value with `"Bearer "`.
 //!
 //! Redirects are never followed: reqwest forwards default headers, the API
@@ -42,8 +42,14 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
-    /// Builds a client from [`Config`]. Fails with [`Error::MissingApiKey`]
-    /// when no key was resolved.
+    /// Builds a client from [`Config`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MissingApiKey`] when no key was resolved,
+    /// [`ConfigError::InvalidApiKeyHeader`] (as [`Error::Config`]) when the
+    /// key cannot be sent in an HTTP header, and [`Error::Http`] when the
+    /// HTTP client cannot be built.
     pub fn new(config: Config) -> Result<Self> {
         let key = config.api_key.ok_or(Error::MissingApiKey)?;
         let mut headers = HeaderMap::new();
@@ -95,12 +101,28 @@ impl ApiClient {
     }
 
     /// `GET path` → deserialized JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Http`] when the request cannot be sent or its body
+    /// cannot be read, [`Error::Redirected`] on a 3xx,
+    /// [`Error::RateLimited`] on a 429, [`Error::Api`] on any other
+    /// non-success status, and [`Error::Deserialization`] when a success
+    /// body does not parse as `T`.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let res = self.http.get(self.url(path)).send().await?;
         self.handle_response(path, res).await
     }
 
     /// `GET path?<params>` → deserialized JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Http`] when the request cannot be sent or its body
+    /// cannot be read, [`Error::Redirected`] on a 3xx,
+    /// [`Error::RateLimited`] on a 429, [`Error::Api`] on any other
+    /// non-success status, and [`Error::Deserialization`] when a success
+    /// body does not parse as `T`.
     pub async fn get_with_params<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -111,6 +133,11 @@ impl ApiClient {
     }
 
     /// `GET path?<params>` → one [`Page`] of `T`.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`get_with_params`](Self::get_with_params) does, with the
+    /// body parsed as a [`Page`] of `T`.
     pub async fn get_page<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -120,6 +147,14 @@ impl ApiClient {
     }
 
     /// `POST path` with a JSON body → deserialized JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Http`] when the request cannot be sent or its body
+    /// cannot be read, [`Error::Redirected`] on a 3xx,
+    /// [`Error::RateLimited`] on a 429, [`Error::Api`] on any other
+    /// non-success status, and [`Error::Deserialization`] when a success
+    /// body does not parse as `T`.
     pub async fn post_json<T: DeserializeOwned, B: Serialize + ?Sized>(
         &self,
         path: &str,
@@ -130,6 +165,12 @@ impl ApiClient {
     }
 
     /// `DELETE path`; succeeds on any 2xx (body ignored).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Http`] when the request cannot be sent,
+    /// [`Error::Redirected`] on a 3xx, [`Error::RateLimited`] on a 429, and
+    /// [`Error::Api`] on any other non-success status.
     pub async fn delete(&self, path: &str) -> Result<()> {
         let res = self.http.delete(self.url(path)).send().await?;
         if res.status().is_success() {

@@ -1,3 +1,7 @@
+//! In-memory OAuth state: registered clients, pending authorizations,
+//! authorization codes, and access and refresh tokens, each bounded and
+//! expired by TTL.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -208,8 +212,11 @@ impl PendingAuthorizations {
 /// authenticates with PKCE on the authorization-code grant.
 #[derive(Clone, Debug)]
 pub struct RegisteredClient {
+    /// The issued client identifier.
     pub client_id: String,
+    /// The display name the client registered, if any.
     pub client_name: Option<String>,
+    /// The redirect URIs the client registered.
     pub redirect_uris: Vec<String>,
     /// When the client was registered or last named by a request.
     pub last_used: Instant,
@@ -218,22 +225,34 @@ pub struct RegisteredClient {
 /// A single-use authorization code issued after user consent.
 #[derive(Clone, Debug)]
 pub struct AuthCode {
+    /// The client the code was issued to.
     pub client_id: String,
+    /// The redirect URI the code is bound to.
     pub redirect_uri: String,
+    /// The scopes the user approved.
     pub scope: Vec<String>,
+    /// The PKCE challenge the token request's verifier must match.
     pub code_challenge: String,
+    /// The PKCE method of `code_challenge`.
     pub code_challenge_method: String,
+    /// When the code was issued; it expires `auth_code_ttl` later.
     pub created_at: Instant,
 }
 
 /// An issued access token with associated metadata.
 #[derive(Clone, Debug)]
 pub struct AccessToken {
+    /// The access token value.
     pub token: String,
+    /// The client the token was issued to.
     pub client_id: String,
+    /// The scopes the token grants.
     pub scope: Vec<String>,
+    /// When the token was issued.
     pub created_at: Instant,
+    /// The token's lifetime from `created_at`, in seconds.
     pub expires_in: u64,
+    /// The refresh token issued alongside it.
     pub refresh_token: String,
 }
 

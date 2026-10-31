@@ -1,3 +1,5 @@
+//! OAuth 2.1 Bearer token authentication for the `/mcp` endpoint.
+
 use axum::{
     body::Body,
     extract::State,
@@ -12,7 +14,9 @@ use crate::oauth::store::OAuthStore;
 /// State shared with the OAuth bearer-token authentication middleware layer.
 #[derive(Clone)]
 pub struct OAuthMiddlewareState {
+    /// The store the presented access token is looked up in.
     pub store: OAuthStore,
+    /// The protected-resource metadata URL every `401` challenge names.
     pub resource_metadata_url: String,
 }
 

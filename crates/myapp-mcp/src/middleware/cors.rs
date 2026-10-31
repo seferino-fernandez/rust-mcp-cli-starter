@@ -1,3 +1,5 @@
+//! CORS layer for the OAuth endpoints.
+
 use axum::http;
 use tower_http::cors::{Any, CorsLayer};
 

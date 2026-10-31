@@ -1,5 +1,6 @@
 //! `myapp`: terminal CLI for the MYAPP API.
 
+#![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 

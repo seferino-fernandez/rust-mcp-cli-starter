@@ -1,7 +1,7 @@
 //! Error types for the `myapp-core` crate.
 //!
 //! All fallible operations return [`Error`] through the crate-level
-//! [`Result`](crate::Result) alias. [`Error::public_message`] is the one
+//! [`Result`] alias. [`Error::public_message`] is the one
 //! policy for what a CLI user or an MCP client may see.
 
 use std::borrow::Cow;
@@ -392,6 +392,7 @@ pub(crate) struct Located<'a> {
 }
 
 impl<'a> Located<'a> {
+    /// Pairs `message` with its `line` and `column`; a zero line is unknown.
     pub(crate) const fn new(line: usize, column: usize, message: &'a str) -> Self {
         Self {
             line,
@@ -437,6 +438,8 @@ pub struct DeserializationError {
 }
 
 impl DeserializationError {
+    /// Keeps the position of `error` and its message, with body values
+    /// removed and every representation of `secrets` scrubbed.
     pub(crate) fn from_serde(error: &serde_json::Error, secrets: &[SecretString]) -> Self {
         Self {
             message: scrub_secret_representations(&redact_serde_message(error), secrets),

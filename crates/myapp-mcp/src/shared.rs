@@ -1,3 +1,5 @@
+//! Command-line arguments and the helpers both transports share.
+
 use clap::{Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 
@@ -119,7 +121,7 @@ pub fn resolve_base_url(config: &ServerConfig, addr: &std::net::SocketAddr) -> S
     base_url
 }
 
-/// Builds an authenticated [`ApiClient`] from config (eager; no login flow).
+/// Builds an authenticated [`ApiClient`](myapp_core::ApiClient) from config (eager; no login flow).
 pub fn create_api_client(config: &ServerConfig) -> anyhow::Result<myapp_core::ApiClient> {
     Ok(myapp_core::ApiClient::new(config.core.clone())?)
 }

@@ -1,3 +1,5 @@
+//! Config loading and API client construction for the CLI commands.
+
 use anyhow::Context;
 use myapp_core::{ApiClient, Config, ConfigOverrides, SecretString};
 use std::path::Path;
