@@ -21,6 +21,10 @@ pub struct Args {
     #[command(subcommand)]
     pub command: Option<Command>,
 
+    #[expect(
+        clippy::doc_markdown,
+        reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
+    )]
     /// Path to config.toml [env: MYAPP_CONFIG]. A path named here or by
     /// MYAPP_CONFIG must exist.
     #[arg(long, value_name = "PATH")]
@@ -45,6 +49,11 @@ pub struct Args {
     #[arg(long)]
     pub api_key: Option<String>,
 
+    #[expect(
+        clippy::doc_markdown,
+        rustdoc::broken_intra_doc_links,
+        reason = "clap renders this doc comment verbatim as --help text, so backticks or an escaped `[::1]` would show"
+    )]
     /// Bind host for HTTP transport: an IP address literal such as 127.0.0.1,
     /// ::1 or [::1].
     #[arg(long)]
@@ -54,19 +63,35 @@ pub struct Args {
     #[arg(long)]
     pub port: Option<u16>,
 
+    #[expect(
+        clippy::doc_markdown,
+        reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
+    )]
     /// Static bearer token for auth_mode=token; an empty or whitespace-only
     /// token is refused at startup [env: MYAPP_MCP_TOKEN].
     #[arg(long)]
     pub token: Option<String>,
 
+    #[expect(
+        clippy::doc_markdown,
+        reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
+    )]
     /// External base URL for OAuth metadata [env: MYAPP_MCP_BASE_URL].
     #[arg(long)]
     pub mcp_base_url: Option<String>,
 
+    #[expect(
+        clippy::doc_markdown,
+        reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
+    )]
     /// Auth mode for the HTTP transport [env: MYAPP_MCP_AUTH_MODE].
     #[arg(long, value_enum)]
     pub auth_mode: Option<AuthMode>,
 
+    #[expect(
+        clippy::doc_markdown,
+        reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
+    )]
     /// PIN required on the OAuth consent screen [env: MYAPP_MCP_OAUTH_PIN].
     #[arg(long)]
     pub oauth_pin: Option<String>,
@@ -81,6 +106,10 @@ pub enum Command {
         /// Shell to generate the completion script for.
         shell: CompletionShell,
     },
+    #[expect(
+        clippy::doc_markdown,
+        reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
+    )]
     /// Generate man pages for the server and all subcommands into <OUT_DIR>.
     Man {
         /// Directory to write the generated man pages into (created if missing).

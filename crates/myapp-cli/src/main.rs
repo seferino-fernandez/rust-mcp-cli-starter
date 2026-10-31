@@ -31,6 +31,10 @@ struct Cli {
     #[arg(long, global = true, default_value = "table")]
     output: OutputFormat,
 
+    #[expect(
+        clippy::doc_markdown,
+        reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
+    )]
     /// Path to config.toml [env: MYAPP_CONFIG]. A path named here or by
     /// MYAPP_CONFIG must exist.
     #[arg(long, global = true)]
@@ -40,6 +44,10 @@ struct Cli {
     #[arg(long, global = true)]
     base_url: Option<String>,
 
+    #[expect(
+        clippy::doc_markdown,
+        reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
+    )]
     /// Override the API key.
     ///
     /// Prefer MYAPP_API_KEY or config to avoid exposing the key in process
@@ -71,6 +79,10 @@ enum Command {
         /// Shell to generate the completion script for.
         shell: completions::CompletionShell,
     },
+    #[expect(
+        clippy::doc_markdown,
+        reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
+    )]
     /// Generate man pages for the CLI and all subcommands into <OUT_DIR>.
     Man {
         /// Directory to write the generated man pages into (created if missing).

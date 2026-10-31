@@ -50,7 +50,27 @@ url = "2.5.8"
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
+bare_urls = "warn"
+invalid_html_tags = "warn"
+invalid_rust_codeblocks = "warn"
+unescaped_backticks = "warn"
+redundant_explicit_links = "warn"
+missing_crate_level_docs = "warn"
+
 [workspace.lints.clippy]
+# Keep public documentation actionable and linked
+missing_safety_doc = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+doc_markdown = "warn"
+
 # Prevent panics from unwraps and unsafe slicing or indexing
 string_slice = "warn"
 indexing_slicing = "warn"
