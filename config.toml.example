@@ -1,7 +1,11 @@
 # MYAPP example configuration
 #
-# Copy to ~/.config/myapp/config.toml, or pass --config / MYAPP_CONFIG.
+# Copy to ~/.config/myapp/config.toml, or pass --config / MYAPP_CONFIG (a file
+# named either way must exist; the default location may be absent).
 # Precedence: CLI flag > MYAPP_* env > MYAPP_*_FILE env > this file > defaults.
+# A secret is read only from the layer that wins, so a lower layer's *_file is
+# never opened. Invalid values fail at startup naming their source; TOML errors
+# give the line and column but never echo the line, which may hold a secret.
 
 # Upstream API base URL. Env: MYAPP_BASE_URL
 base_url = "http://localhost:8080"
@@ -14,8 +18,11 @@ base_url = "http://localhost:8080"
 # api_key_file = "/run/secrets/myapp-api-key"
 
 [log]
-# trace|debug|info|warn|error. Env: MYAPP_LOG_LEVEL
-level = "info"
+# trace|debug|info|warn|error|off. Env: MYAPP_LOG_LEVEL
+# Unset by default: the myapp CLI then logs errors only and myapp-mcp logs info.
+# -v/-q override this; RUST_LOG overrides everything. An invalid value prints a
+# warning and falls back to the binary's default.
+# level = "info"
 
 [http]
 # Env: MYAPP_HTTP_REQUEST_TIMEOUT_SECS / MYAPP_HTTP_CONNECT_TIMEOUT_SECS
@@ -24,21 +31,26 @@ connect_timeout_secs = 10
 
 [mcp]
 # HTTP transport bind. Env: MYAPP_MCP_HOST / MYAPP_MCP_PORT
+# host must be an IP literal: "127.0.0.1", "::1", "[::1]" or "fe80::1%2"
+# (numeric scope id). Hostnames such as "localhost" are refused.
 # host = "127.0.0.1"
 # port = 8080
 
 # Auth mode for the MCP endpoint: "token" | "oauth" | "none".
-# Env: MYAPP_MCP_AUTH_MODE
+# Any other value fails at startup. Env: MYAPP_MCP_AUTH_MODE
 # auth_mode = "token"
 
-# Static bearer token for auth_mode="token". Env: MYAPP_MCP_TOKEN / _FILE
+# Static bearer token for auth_mode="token"; an empty or whitespace-only token
+# is refused at startup. Mutually exclusive with token_file. Read only by
+# --transport http. Env: MYAPP_MCP_TOKEN / _FILE
 # token = ""
 # token_file = "/run/secrets/myapp-mcp-token"
 
 # External base URL for OAuth metadata. Env: MYAPP_MCP_BASE_URL
 # base_url = "https://mcp.example.com"
 
-# OAuth consent PIN. Env: MYAPP_MCP_OAUTH_PIN / _FILE
+# OAuth consent PIN. Mutually exclusive with oauth_pin_file. Read only by
+# --transport http. Env: MYAPP_MCP_OAUTH_PIN / _FILE
 # oauth_pin = ""
 # oauth_pin_file = "/run/secrets/myapp-mcp-oauth-pin"
 

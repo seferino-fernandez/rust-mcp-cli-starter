@@ -78,7 +78,8 @@ myapp-mcp --transport http --auth-mode oauth --port 8080
 `RUST_LOG` → `-v`/`-q` (when passed) → `MYAPP_LOG_LEVEL` / config `log.level` → default (`info`)
 
 So `myapp-mcp -q --transport stdio` quiets a run without touching config, while
-config / `MYAPP_LOG_LEVEL` still apply when no flag is given.
+config / `MYAPP_LOG_LEVEL` still apply when no flag is given. An invalid
+configured level prints a warning and falls back to `info`.
 
 ## Example tools
 
@@ -126,18 +127,28 @@ man -l ./man/myapp-mcp.1
 ## Configuration
 
 Config file default: `~/.config/myapp/config.toml` (or `--config` / `MYAPP_CONFIG`).
+A file named by `--config` or `MYAPP_CONFIG` must exist; the default may be
+absent.
 
-| Variable                            | Description                          |
-| ----------------------------------- | ------------------------------------ |
-| `MYAPP_BASE_URL`                    | Upstream API base URL                |
-| `MYAPP_API_KEY`                     | API key sent as `X-Api-Key`          |
-| `MYAPP_MCP_HOST`                    | Bind address                         |
-| `MYAPP_MCP_PORT`                    | Bind port                            |
-| `MYAPP_MCP_AUTH_MODE`               | Authentication mode                  |
-| `MYAPP_MCP_TOKEN`                   | Static bearer token                  |
-| `MYAPP_MCP_TOKEN_FILE`              | Path to file containing bearer token |
-| `MYAPP_MCP_BASE_URL`                | External base URL for OAuth          |
-| `MYAPP_MCP_OAUTH_PIN`               | OAuth consent screen PIN             |
-| `MYAPP_MCP_OAUTH_TOKEN_EXPIRY_SECS` | OAuth token lifetime (default: 3600) |
+Each setting comes from the highest layer that sets it: CLI flag, then
+`MYAPP_*` env, then `MYAPP_*_FILE` env, then `config.toml`. A secret's lower
+layers are never read, so a `MYAPP_MCP_TOKEN_FILE` behind `--token` is never
+opened. The `token` and `oauth_pin` are HTTP-only: `--transport stdio` never
+resolves them. A value that does not parse fails at startup naming its
+source: an env var by name and raw value, a TOML key by file, line and
+column (the offending line is never echoed, since it may hold a secret).
+
+| Variable                            | Description                                          |
+| ----------------------------------- | ---------------------------------------------------- |
+| `MYAPP_BASE_URL`                    | Upstream API base URL                                |
+| `MYAPP_API_KEY`                     | API key sent as `X-Api-Key`                          |
+| `MYAPP_MCP_HOST`                    | Bind IP literal (`127.0.0.1`, `::1`, `[::1]`)        |
+| `MYAPP_MCP_PORT`                    | Bind port                                            |
+| `MYAPP_MCP_AUTH_MODE`               | Authentication mode: `token`, `oauth` or `none`      |
+| `MYAPP_MCP_TOKEN`                   | Static bearer token; empty or whitespace is refused  |
+| `MYAPP_MCP_TOKEN_FILE`              | Path to file containing bearer token                 |
+| `MYAPP_MCP_BASE_URL`                | External base URL for OAuth                          |
+| `MYAPP_MCP_OAUTH_PIN`               | OAuth consent screen PIN                             |
+| `MYAPP_MCP_OAUTH_TOKEN_EXPIRY_SECS` | OAuth token lifetime (default: 3600)                 |
 
 See [config.toml.example](../../config.toml.example) for all available fields.

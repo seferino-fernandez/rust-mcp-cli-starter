@@ -9,17 +9,17 @@ It powers the `myapp-cli` terminal app and the `myapp-mcp` Model Context Protoco
 ## Features
 
 - Authenticated HTTP client (`ApiClient`) that sends the configured API key as the `X-Api-Key` header on every request.
-- Layered [`Config`] loading: CLI flag → `MYAPP_*` env → `MYAPP_*_FILE` secret files → `config.toml` → defaults.
+- Layered [`Config`] loading: CLI flag (as `ConfigOverrides`) → `MYAPP_*` env → `MYAPP_*_FILE` secret files → `config.toml` → defaults. A losing layer's secret file is never read; a bad env value, a missing `--config` / `MYAPP_CONFIG` file, or invalid TOML is an error naming its source.
 - Typed error model (`Error`) covering transport failures, API errors, and rate limiting (HTTP 429).
 - A generic pagination envelope (`Page<T>`) and example endpoint methods you replace with your own.
 
 ## Example
 
 ```rust,no_run
-use myapp_core::{ApiClient, Config};
+use myapp_core::{ApiClient, Config, ConfigOverrides};
 
 # async fn run() -> myapp_core::Result<()> {
-let config = Config::load(None)?;
+let config = Config::load(None, &ConfigOverrides::default())?;
 let client = ApiClient::new(config)?;
 
 let status = client.system_status().await?;

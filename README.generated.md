@@ -47,18 +47,25 @@ MYAPP_BASE_URL=http://localhost:8080 MYAPP_API_KEY=xxxx cargo run -p myapp-cli -
 Configuration is layered, highest precedence first:
 CLI flag, then `MYAPP_*` env, then `MYAPP_*_FILE` env, then `config.toml`, then
 built-in defaults. See [`config.toml.example`](config.toml.example) for every setting.
+Only the winning layer of a secret is read, so a `*_FILE` behind a higher layer
+is never opened, and the MCP server's stdio transport never reads the
+HTTP-only `token` and `oauth_pin`. Mistakes fail at startup: an env value that
+does not parse is an error naming the variable, a config file named by
+`--config` or `MYAPP_CONFIG` must exist, and a TOML error reports the line and
+column without echoing the line.
 
 ## Logging and verbosity flag
 
-Both binaries take `-v`/`--verbose` and `-q`/`--quiet` flags. By default only
-errors are reported; repeat `-v` to step up:
+Both binaries take `-v`/`--verbose` and `-q`/`--quiet` flags: `-q` silent;
+`-v` warn, `-vv` info, `-vvv` debug, `-vvvv` trace. Default level precedence,
+highest first:
 
-- `-q` silent
-- (default) errors only
-- `-v` warn, `-vv` info, `-vvv` debug, `-vvvv` trace
+`RUST_LOG` → `-v`/`-q` (when passed) → `MYAPP_LOG_LEVEL` / `[log] level` → built-in default
 
-Place the flag before the subcommand: `myapp -v status`. Setting `RUST_LOG`
-overrides these flags entirely (e.g. `RUST_LOG=myapp_core=trace,reqwest=debug`).
+The built-in default is `error` for the `myapp` CLI and `info` for the
+`myapp-mcp` server. An invalid configured level prints a warning and falls back
+to that default. Place the flag before the subcommand: `myapp -v status`.
+`RUST_LOG` overrides everything (e.g. `RUST_LOG=myapp_core=trace,reqwest=debug`).
 
 ## Shell completions
 
