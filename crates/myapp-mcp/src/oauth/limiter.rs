@@ -15,12 +15,12 @@
 //!   failure, if no backoff is in effect). Time inside a backoff never counts,
 //!   so once backoffs reach [`MAX_BACKOFF`] the cap is held until then.
 //!
-//! The limiter is global, so anyone who can reach `/oauth/approve` can lock
-//! the owner out too. [`MAX_BACKOFF`] is therefore one minute, the same as
-//! [`BASE_BACKOFF`]: a lockout delays the owner by at most about a minute,
-//! while a guesser is held to roughly one guess a minute after the first
-//! lockout, which keeps brute force against the 8-character minimum PIN
-//! infeasible.
+//! The limiter is global on purpose. A per-IP limiter would be spoofable,
+//! or meaningless behind a proxy that gives every caller the same address.
+//! The cost is that anyone who can reach `/oauth/approve` can lock the owner
+//! out too, for up to [`MAX_BACKOFF`] (15 minutes) at a time. That was
+//! chosen over a shorter cap: a one-minute cap would let a dictionary attack
+//! try about 1,440 PINs a day, enough to find a weak PIN.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -31,9 +31,9 @@ pub const MAX_FAILURES: usize = 5;
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 /// The length of the first backoff after a reset.
 pub const BASE_BACKOFF: Duration = Duration::from_secs(60);
-/// The longest a backoff can grow by doubling. One minute, so a remote
-/// party can delay the owner by at most about a minute per lockout.
-pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// The longest a backoff can grow by doubling, and so the longest a remote
+/// party can delay the owner per lockout.
+pub const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
 /// Time without a failure that resets the limiter, counted from the later of
 /// the last failure and the end of the latest backoff.
 pub const QUIET_RESET: Duration = Duration::from_secs(15 * 60);
@@ -161,16 +161,22 @@ mod tests {
         last
     }
 
-    /// Drives a fresh limiter from `start` into its first backoff and then a
-    /// second, started by one wrong PIN as the first ends. Returns the time
-    /// the second backoff started.
+    /// Drives a fresh limiter from `start` through 60, 120, 240, 480 and a
+    /// capped 900 s backoff, each wrong PIN arriving as the previous backoff
+    /// ends. Returns the time the 900 s backoff started.
     fn drive_to_max_backoff(limiter: &mut PinLimiter, start: Instant) -> Instant {
-        let (fifth, started) = fail_times(limiter, start, 5);
-        assert_eq!(started, Some(BASE_BACKOFF));
-        let now = after(fifth, BASE_BACKOFF);
-        assert_eq!(limiter.check(now), Ok(()));
-        assert_eq!(limiter.record_failure(now), Some(MAX_BACKOFF));
-        assert_eq!(limiter.check(now), Err(MAX_BACKOFF));
+        let (mut now, started) = fail_times(limiter, start, 5);
+        let mut backoff = started.unwrap();
+        assert_eq!(backoff, BASE_BACKOFF);
+        // 120, 240, 480, then 960 capped to 900.
+        for expected in [120, 240, 480, 900] {
+            now = after(now, backoff);
+            assert_eq!(limiter.check(now), Ok(()));
+            backoff = limiter.record_failure(now).unwrap();
+            assert_eq!(backoff, secs(expected));
+            assert_eq!(limiter.check(now), Err(backoff));
+        }
+        assert_eq!(backoff, MAX_BACKOFF);
         now
     }
 
@@ -250,35 +256,18 @@ mod tests {
     }
 
     #[test]
-    fn max_backoff_is_one_minute() {
-        assert_eq!(MAX_BACKOFF, secs(60));
-        assert!(BASE_BACKOFF <= MAX_BACKOFF);
-    }
-
-    #[test]
-    fn each_failure_after_a_backoff_starts_one_capped_at_a_minute() {
-        let start = Instant::now();
+    fn each_failure_after_a_backoff_doubles_it_up_to_the_cap() {
         let mut limiter = PinLimiter::default();
-        let (mut now, started) = fail_times(&mut limiter, start, 5);
-        let mut backoff = started.unwrap();
-        // Doubling never passes the cap.
-        for _ in 0..4 {
-            now = after(now, backoff);
-            assert_eq!(limiter.check(now), Ok(()));
-            backoff = limiter.record_failure(now).unwrap();
-            assert_eq!(backoff, MAX_BACKOFF);
-            assert_eq!(limiter.check(now), Err(MAX_BACKOFF));
-            assert_eq!(limiter.check(after(now, secs(59))), Err(secs(1)));
-        }
+        drive_to_max_backoff(&mut limiter, Instant::now());
         assert_eq!(limiter.failures_since_reset(), 9);
     }
 
     #[test]
-    fn the_cap_is_held_after_each_backoff_ends() {
+    fn the_fifteen_minute_cap_is_held_after_each_backoff_ends() {
         let mut limiter = PinLimiter::default();
         let mut started = drive_to_max_backoff(&mut limiter, Instant::now());
-        // A wrong PIN as the backoff ends, or just short of 15 quiet minutes
-        // after it ends, starts another one-minute backoff every time.
+        // A wrong PIN as the 900 s backoff ends, or just short of 15 quiet
+        // minutes after it ends, starts another 900 s backoff every time.
         let almost_quiet = QUIET_RESET.checked_sub(secs(1)).unwrap();
         for wait_after_end in [Duration::ZERO, secs(1), almost_quiet, Duration::ZERO] {
             let now = after(after(started, MAX_BACKOFF), wait_after_end);
@@ -287,11 +276,11 @@ mod tests {
             assert_eq!(limiter.check(now), Err(MAX_BACKOFF));
             started = now;
         }
-        assert_eq!(limiter.failures_since_reset(), 10);
+        assert_eq!(limiter.failures_since_reset(), 13);
     }
 
     #[test]
-    fn fifteen_quiet_minutes_after_a_backoff_ends_reset_the_limiter() {
+    fn fifteen_quiet_minutes_after_a_full_backoff_ends_reset_the_limiter() {
         let mut limiter = PinLimiter::default();
         let started = drive_to_max_backoff(&mut limiter, Instant::now());
         let quiet = after(after(started, MAX_BACKOFF), QUIET_RESET);
@@ -305,20 +294,29 @@ mod tests {
     }
 
     #[test]
-    fn quiet_minutes_are_counted_from_the_end_of_the_backoff() {
-        // Just short of 15 minutes after the backoff ends, the limiter is
-        // still escalated: one wrong PIN backs off at once.
-        let mut limiter = PinLimiter::default();
-        let started = drive_to_max_backoff(&mut limiter, Instant::now());
-        let backoff_end = after(started, MAX_BACKOFF);
-        let almost = after(backoff_end, QUIET_RESET.checked_sub(secs(1)).unwrap());
-        assert_eq!(limiter.record_failure(almost), Some(MAX_BACKOFF));
+    fn fifteen_quiet_minutes_reset_the_next_backoff() {
+        // Escalates to a 120 s backoff started at `ended`, the moment the
+        // first 60 s backoff ends, and returns when the 120 s one ends.
+        fn escalated(limiter: &mut PinLimiter) -> Instant {
+            let (fifth, _) = fail_times(limiter, Instant::now(), 5);
+            let ended = after(fifth, BASE_BACKOFF);
+            assert_eq!(limiter.record_failure(ended), Some(secs(120)));
+            after(ended, secs(120))
+        }
 
-        // Fifteen minutes after the end, it has reset: four failures no
-        // longer back off, and the fifth starts the base backoff again.
+        // The quiet minutes are counted after the backoff ends, not from the
+        // failure that started it: just short of 15 minutes after the end,
+        // the limiter is still escalated.
         let mut limiter = PinLimiter::default();
-        let started = drive_to_max_backoff(&mut limiter, Instant::now());
-        let quiet = after(after(started, MAX_BACKOFF), QUIET_RESET);
+        let backoff_end = escalated(&mut limiter);
+        let almost = after(backoff_end, QUIET_RESET.checked_sub(secs(1)).unwrap());
+        assert_eq!(limiter.record_failure(almost), Some(secs(240)));
+
+        // Fifteen minutes after the end, it has reset: one failure no longer
+        // backs off, and the fifth starts 60 s again.
+        let mut limiter = PinLimiter::default();
+        let backoff_end = escalated(&mut limiter);
+        let quiet = after(backoff_end, QUIET_RESET);
         assert_eq!(limiter.check(quiet), Ok(()));
         let (_, started) = fail_times(&mut limiter, quiet, 4);
         assert_eq!(started, None);
@@ -334,7 +332,7 @@ mod tests {
         let mut limiter = PinLimiter::default();
         let (fifth, _) = fail_times(&mut limiter, start, 5);
         let almost = after(fifth, QUIET_RESET.checked_sub(secs(1)).unwrap());
-        assert_eq!(limiter.record_failure(almost), Some(MAX_BACKOFF));
+        assert_eq!(limiter.record_failure(almost), Some(secs(120)));
     }
 
     #[test]
