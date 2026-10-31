@@ -1,11 +1,12 @@
 //! `myapp status`: print server health.
 
 use crate::output::{self, OutputFormat};
+use crate::utils::error::safe_core_error;
 use myapp_core::ApiClient;
 
 /// Runs the status command.
 pub async fn run(client: &ApiClient, output: OutputFormat) -> anyhow::Result<()> {
-    let status = client.system_status().await?;
+    let status = client.system_status().await.map_err(safe_core_error)?;
     match output {
         OutputFormat::Json => output::print_json(&status)?,
         OutputFormat::Csv => output::print_csv(

@@ -3,6 +3,7 @@
 use std::slice;
 
 use crate::output::OutputFormat;
+use crate::utils::error::safe_core_error;
 use clap::Subcommand;
 use myapp_core::ApiClient;
 use myapp_core::models::{Item, NewItem};
@@ -47,11 +48,14 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     match command {
         ItemCommand::List { page, page_size } => {
-            let result = client.list_items(*page, *page_size).await?;
+            let result = client
+                .list_items(*page, *page_size)
+                .await
+                .map_err(safe_core_error)?;
             render_items(&result.records, output)?;
         }
         ItemCommand::Get { id } => {
-            let item = client.get_item(*id).await?;
+            let item = client.get_item(*id).await.map_err(safe_core_error)?;
             render_items(slice::from_ref(&item), output)?;
         }
         ItemCommand::Create { name, enabled } => {
@@ -60,11 +64,12 @@ pub async fn run(
                     name: name.clone(),
                     enabled: *enabled,
                 })
-                .await?;
+                .await
+                .map_err(safe_core_error)?;
             render_items(slice::from_ref(&item), output)?;
         }
         ItemCommand::Delete { id } => {
-            client.delete_item(*id).await?;
+            client.delete_item(*id).await.map_err(safe_core_error)?;
             println!("Deleted item {id}");
         }
     }
