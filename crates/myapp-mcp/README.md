@@ -116,9 +116,12 @@ myapp-mcp --transport http --auth-mode oauth --port 8080
   another's request this way until the global limit is reached.
 - **Availability.** Registration is open, so a sustained flood from many
   registered clients can still evict a legitimate pending authorization
-  before the owner approves it, and can keep registration at its cap. Before
-  exposing the OAuth server publicly, put a rate limiter or reverse proxy in
-  front of it that limits `/oauth/register` and `/oauth/authorize`.
+  before the owner approves it, and can keep registration at its cap. Anyone
+  who knows a client's `client_id` and registered redirect URI can evict that
+  client's pending authorizations (16 per client) without registering, which
+  forces the user to retry but grants nothing. Before exposing the OAuth
+  server publicly, put a rate limiter or reverse proxy in front of it that
+  limits `/oauth/register` and `/oauth/authorize`.
 - **Errors.** Every OAuth endpoint answers a body or query it cannot parse
   with a JSON OAuth error that does not echo the input.
 - **Scopes.** Clients may request `read` and `write`; a request naming

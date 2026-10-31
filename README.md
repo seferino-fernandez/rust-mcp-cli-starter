@@ -150,8 +150,11 @@ Older clients still negotiate down: the server accepts every protocol version
 rmcp knows, so a 2025-11-25 client keeps its session and resumability while a
 2026-07-28 client is served statelessly.
 
-Tool input schemas are closed (`additionalProperties: false`) and tool results
-are capped to a configurable byte budget. See the
+Tool names carry a `myapp_` prefix. Tool input schemas are closed
+(`additionalProperties: false`) and unknown arguments are refused, tool results
+are capped to a configurable byte budget, OAuth tokens without the `write`
+scope may call only read-only tools, and destructive tools ask capable clients
+for confirmation (`confirm_destructive`). See the
 [`myapp-mcp` README](crates/myapp-mcp/README.md) for details.
 
 ## License
