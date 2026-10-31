@@ -20,6 +20,10 @@ const REFRESH_TOKEN_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// is unauthenticated, so an unbounded map is a memory-exhaustion vector.
 pub const MAX_CLIENTS: usize = 1024;
 
+/// The most pending authorizations held at once. `/oauth/authorize` is
+/// unauthenticated, so each one is attacker-sized memory until it expires.
+pub const MAX_PENDING_AUTHORIZATIONS: usize = 1024;
+
 /// How long a registered client is kept once it is unused: nothing has named
 /// it and it holds no live pending authorization, code or token.
 pub const CLIENT_IDLE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -38,6 +42,9 @@ pub struct OAuthStoreConfig {
     pub max_clients: usize,
     /// How long an unused client is kept; [`CLIENT_IDLE_TTL`] by default.
     pub client_idle_ttl: Duration,
+    /// The most pending authorizations held at once;
+    /// [`MAX_PENDING_AUTHORIZATIONS`] by default.
+    pub max_pending_authorizations: usize,
 }
 
 impl Default for OAuthStoreConfig {
@@ -48,6 +55,7 @@ impl Default for OAuthStoreConfig {
             token_expiry_secs: 3600,
             max_clients: MAX_CLIENTS,
             client_idle_ttl: CLIENT_IDLE_TTL,
+            max_pending_authorizations: MAX_PENDING_AUTHORIZATIONS,
         }
     }
 }
@@ -288,19 +296,37 @@ impl OAuthStore {
 
     /// Hold a validated authorization request until consent and return the
     /// fresh, single-use consent nonce that names it.
-    pub fn begin_authorization(&self, pending: PendingAuthorization) -> String {
+    ///
+    /// Returns `None` when the store holds
+    /// [`max_pending_authorizations`](OAuthStoreConfig::max_pending_authorizations)
+    /// even after dropping expired ones.
+    pub fn begin_authorization(&self, pending: PendingAuthorization) -> Option<String> {
+        let mut inner = self.lock();
+        if inner.pending_authorizations.len() >= self.config.max_pending_authorizations {
+            let csrf_nonce_ttl = self.config.csrf_nonce_ttl;
+            inner
+                .pending_authorizations
+                .retain(|_, (_, created_at)| created_at.elapsed() <= csrf_nonce_ttl);
+        }
+        if inner.pending_authorizations.len() >= self.config.max_pending_authorizations {
+            return None;
+        }
         let nonce = format!("{}{}", CONSENT_NONCE_PREFIX, Uuid::new_v4());
-        self.lock()
+        inner
             .pending_authorizations
             .insert(nonce.clone(), (pending, Instant::now()));
-        nonce
+        Some(nonce)
     }
 
     /// Take the pending authorization named by `nonce`, removing it. Returns
-    /// `None` if the nonce is unknown, already taken, or expired.
+    /// `None` if the nonce is unknown, already taken, or expired, or if its
+    /// client is no longer registered.
     pub fn take_authorization(&self, nonce: &str) -> Option<PendingAuthorization> {
-        let (pending, created_at) = self.lock().pending_authorizations.remove(nonce)?;
-        if created_at.elapsed() > self.config.csrf_nonce_ttl {
+        let mut inner = self.lock();
+        let (pending, created_at) = inner.pending_authorizations.remove(nonce)?;
+        if created_at.elapsed() > self.config.csrf_nonce_ttl
+            || !inner.clients.contains_key(&pending.client_id)
+        {
             return None;
         }
         Some(pending)
@@ -448,6 +474,12 @@ impl OAuthStore {
             .last_used
             .checked_sub(age)
             .expect("backdated instant is representable");
+    }
+
+    /// Remove `client_id` from the store outright (test aid).
+    #[cfg(test)]
+    pub(crate) fn forget_client(&self, client_id: &str) {
+        self.lock().clients.remove(client_id);
     }
 
     /// Whether `client_id` is still registered (test aid).
@@ -638,10 +670,10 @@ mod tests {
             .expect("a poisoned store still refreshes");
     }
 
-    fn pending_authorization() -> PendingAuthorization {
+    /// A pending authorization for a client registered in `store`.
+    fn pending_authorization(store: &OAuthStore) -> PendingAuthorization {
         PendingAuthorization {
-            client_id: "cid".into(),
-            client_name: None,
+            client_id: register(store).client_id,
             redirect_uri: "http://localhost/cb".into(),
             redirect_url: url::Url::parse("http://localhost/cb").unwrap(),
             scopes: vec!["read".into()],
@@ -654,11 +686,13 @@ mod tests {
     #[test]
     fn pending_authorization_is_taken_once() {
         let store = OAuthStore::new(OAuthStoreConfig::default());
-        let nonce = store.begin_authorization(pending_authorization());
+        let pending = pending_authorization(&store);
+        let client_id = pending.client_id.clone();
+        let nonce = store.begin_authorization(pending).unwrap();
         assert!(nonce.starts_with("myapp_consent_"));
 
         let pending = store.take_authorization(&nonce).unwrap();
-        assert_eq!(pending.client_id, "cid");
+        assert_eq!(pending.client_id, client_id);
         assert_eq!(pending.code_challenge, "challenge123");
 
         assert!(store.take_authorization(&nonce).is_none());
@@ -672,10 +706,71 @@ mod tests {
             ..Default::default()
         };
         let store = OAuthStore::new(config);
-        let nonce = store.begin_authorization(pending_authorization());
+        let nonce = store
+            .begin_authorization(pending_authorization(&store))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(10));
 
         assert!(store.take_authorization(&nonce).is_none());
+    }
+
+    #[test]
+    fn pending_authorization_for_a_removed_client_is_not_taken() {
+        let store = OAuthStore::new(OAuthStoreConfig::default());
+        let pending = pending_authorization(&store);
+        let client_id = pending.client_id.clone();
+        let nonce = store.begin_authorization(pending).unwrap();
+        store.forget_client(&client_id);
+
+        assert!(store.take_authorization(&nonce).is_none());
+    }
+
+    #[test]
+    fn pending_authorizations_are_capped() {
+        let store = OAuthStore::new(OAuthStoreConfig {
+            max_pending_authorizations: 2,
+            ..Default::default()
+        });
+        for _ in 0..2 {
+            store
+                .begin_authorization(pending_authorization(&store))
+                .unwrap();
+        }
+        assert!(
+            store
+                .begin_authorization(pending_authorization(&store))
+                .is_none(),
+            "a pending authorization past the cap must be refused"
+        );
+        assert_eq!(store.lock().pending_authorizations.len(), 2);
+    }
+
+    #[test]
+    fn default_pending_cap_is_max_pending_authorizations() {
+        assert_eq!(
+            OAuthStoreConfig::default().max_pending_authorizations,
+            MAX_PENDING_AUTHORIZATIONS
+        );
+        assert_eq!(MAX_PENDING_AUTHORIZATIONS, 1024);
+    }
+
+    #[test]
+    fn pending_cap_makes_room_by_dropping_expired_entries_first() {
+        let store = OAuthStore::new(OAuthStoreConfig {
+            max_pending_authorizations: 1,
+            csrf_nonce_ttl: Duration::ZERO,
+            ..Default::default()
+        });
+        let expired = store
+            .begin_authorization(pending_authorization(&store))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        let fresh = store
+            .begin_authorization(pending_authorization(&store))
+            .expect("the expired entry is swept to make room");
+        let inner = store.lock();
+        assert!(!inner.pending_authorizations.contains_key(&expired));
+        assert!(inner.pending_authorizations.contains_key(&fresh));
     }
 
     #[test]
@@ -684,13 +779,17 @@ mod tests {
             csrf_nonce_ttl: Duration::ZERO,
             ..Default::default()
         });
-        let nonce = expiring.begin_authorization(pending_authorization());
+        let nonce = expiring
+            .begin_authorization(pending_authorization(&expiring))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(10));
         expiring.sweep_expired();
         assert!(!expiring.lock().pending_authorizations.contains_key(&nonce));
 
         let lasting = OAuthStore::new(OAuthStoreConfig::default());
-        let nonce = lasting.begin_authorization(pending_authorization());
+        let nonce = lasting
+            .begin_authorization(pending_authorization(&lasting))
+            .unwrap();
         lasting.sweep_expired();
         assert!(lasting.take_authorization(&nonce).is_some());
     }

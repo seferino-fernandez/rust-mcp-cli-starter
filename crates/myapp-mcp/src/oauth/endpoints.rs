@@ -1,7 +1,10 @@
 use axum::http::header;
 use axum::{
     Form, Json,
-    extract::{Query, State},
+    extract::{
+        Query, State,
+        rejection::{FormRejection, JsonRejection, QueryRejection},
+    },
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
 };
@@ -18,6 +21,17 @@ use super::pkce;
 use super::store::RefreshError;
 
 const CONSENT_HTML: &str = include_str!("consent.html");
+
+/// The longest `client_name` a client may register, in characters.
+const MAX_CLIENT_NAME_CHARS: usize = 256;
+/// The most redirect URIs a client may register.
+const MAX_REDIRECT_URIS: usize = 10;
+/// The longest redirect URI a client may register, in bytes.
+const MAX_REDIRECT_URI_BYTES: usize = 2048;
+/// The longest `state` `/oauth/authorize` accepts, in bytes.
+const MAX_STATE_BYTES: usize = 512;
+/// The length range of a PKCE code challenge (RFC 7636 §4.2).
+const CODE_CHALLENGE_CHARS: std::ops::RangeInclusive<usize> = 43..=128;
 
 /// `GET /.well-known/oauth-protected-resource`: returns resource metadata
 /// including supported scopes and authorization server references.
@@ -68,12 +82,26 @@ pub async fn authorization_server_metadata(
 /// browser off this server to a URI they registered. Only the consent
 /// decision posted to `/oauth/approve` redirects.
 ///
+/// A query that does not deserialize, such as one missing `response_type`,
+/// `client_id` or `redirect_uri`, is a JSON 400 that does not echo it.
+/// `state` is limited to [`MAX_STATE_BYTES`], and `code_challenge` must be
+/// 43 to 128 characters of the PKCE unreserved set (RFC 7636 §4.2). Past
+/// [`MAX_PENDING_AUTHORIZATIONS`](super::store::MAX_PENDING_AUTHORIZATIONS)
+/// held requests, a new one gets a JSON 429.
+///
 /// Of the requested scopes only `read` and `write` are kept, and `read` is
 /// granted when none are left.
 pub async fn authorize(
     State(state): State<Arc<OAuthEndpointState>>,
-    Query(params): Query<AuthorizeQuery>,
+    params: Result<Query<AuthorizeQuery>, QueryRejection>,
 ) -> Response {
+    let Ok(Query(params)) = params else {
+        tracing::debug!("GET /oauth/authorize: malformed query");
+        return bad_request(
+            "invalid_request",
+            "Malformed authorization request: response_type, client_id and redirect_uri are required",
+        );
+    };
     tracing::debug!(
         client_id = %params.client_id,
         redirect_uri = %params.redirect_uri,
@@ -116,6 +144,23 @@ pub async fn authorize(
     let Some(code_challenge) = params.code_challenge else {
         return bad_request("invalid_request", "code_challenge is required");
     };
+    if !is_valid_code_challenge(&code_challenge) {
+        return bad_request(
+            "invalid_request",
+            "code_challenge must be 43 to 128 characters of A-Z, a-z, 0-9, \"-\", \".\", \"_\" \
+             and \"~\"",
+        );
+    }
+    if params
+        .state
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_STATE_BYTES)
+    {
+        return bad_request(
+            "invalid_request",
+            &format!("state must be at most {MAX_STATE_BYTES} bytes"),
+        );
+    }
 
     let requested_scopes: Vec<String> = params
         .scope
@@ -133,7 +178,6 @@ pub async fn authorize(
 
     let pending = PendingAuthorization {
         client_id: client.client_id,
-        client_name: client.client_name,
         redirect_uri: params.redirect_uri,
         redirect_url,
         scopes,
@@ -141,8 +185,24 @@ pub async fn authorize(
         code_challenge_method,
         state: params.state,
     };
-    let consent_nonce = state.store.begin_authorization(pending.clone());
-    let html = render_consent(&pending, &consent_nonce, state.oauth_pin.is_some());
+    let html_pending = pending.clone();
+    let Some(consent_nonce) = state.store.begin_authorization(pending) else {
+        tracing::warn!("Authorization refused: too many pending authorizations");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "temporarily_unavailable",
+                "error_description": "Too many pending authorization requests; retry later"
+            })),
+        )
+            .into_response();
+    };
+    let html = render_consent(
+        &html_pending,
+        client.client_name.as_deref(),
+        &consent_nonce,
+        state.oauth_pin.is_some(),
+    );
     (
         [
             (header::X_FRAME_OPTIONS, "DENY"),
@@ -166,11 +226,19 @@ pub async fn authorize(
 /// With a PIN configured, an approval is first checked against the global
 /// [`PinLimiter`](super::limiter::PinLimiter): during a backoff it gets
 /// `429 Too Many Requests` with `Retry-After` and the PIN is not compared.
-/// Denials and pinless approvals never touch the limiter.
+/// Denials and pinless approvals never touch the limiter. A form that does
+/// not deserialize is a JSON 400 that does not echo it.
 pub async fn approve(
     State(state): State<Arc<OAuthEndpointState>>,
-    Form(form): Form<ApprovalForm>,
+    form: Result<Form<ApprovalForm>, FormRejection>,
 ) -> Response {
+    let Ok(Form(form)) = form else {
+        tracing::debug!("POST /oauth/approve: malformed form");
+        return bad_request(
+            "invalid_request",
+            "Malformed consent form: consent_nonce and approved are required",
+        );
+    };
     tracing::debug!(approved = %form.approved, "POST /oauth/approve");
 
     let Some(pending) = state.store.take_authorization(&form.consent_nonce) else {
@@ -229,9 +297,9 @@ pub async fn approve(
             PinOutcome::Wrong { backoff, failures } => {
                 if let Some(backoff) = backoff {
                     tracing::warn!(
-                        backoff_secs = backoff.as_secs(),
+                        retry_after_secs = retry_after_secs(backoff),
                         failures,
-                        "Too many wrong consent PINs; refusing approvals during backoff"
+                        "Too many wrong consent PINs; approvals locked out"
                     );
                 }
                 return redirect_with_error(
@@ -265,6 +333,7 @@ pub async fn approve(
 /// when `pin_required`.
 fn render_consent(
     pending: &PendingAuthorization,
+    client_name: Option<&str>,
     consent_nonce: &str,
     pin_required: bool,
 ) -> String {
@@ -298,9 +367,7 @@ fn render_consent(
         ""
     };
     let client_name = html_escape(
-        pending
-            .client_name
-            .as_deref()
+        client_name
             .filter(|name| !name.trim().is_empty())
             .unwrap_or("An unnamed client"),
     );
@@ -377,11 +444,19 @@ fn pin_backoff_response(remaining: Duration) -> Response {
 }
 
 /// `POST /oauth/token`: handles token exchange (`authorization_code`) and
-/// token refresh (`refresh_token`) grant types.
+/// token refresh (`refresh_token`) grant types. A form that does not
+/// deserialize is a JSON 400 that does not echo it.
 pub async fn token(
     State(state): State<Arc<OAuthEndpointState>>,
-    Form(req): Form<TokenRequest>,
+    req: Result<Form<TokenRequest>, FormRejection>,
 ) -> Response {
+    let Ok(Form(req)) = req else {
+        tracing::debug!("POST /oauth/token: malformed form");
+        return token_error(
+            "invalid_request",
+            "Malformed token request: grant_type is required",
+        );
+    };
     tracing::debug!(
         grant_type = %req.grant_type,
         client_id = %req.client_id,
@@ -516,10 +591,26 @@ fn token_error(error: &str, description: &str) -> Response {
 /// (RFC 7591 §3.2.2) and no client is stored. Once the store holds
 /// [`MAX_CLIENTS`](super::store::MAX_CLIENTS) clients, registration gets a
 /// JSON 429 until unused clients expire.
+///
+/// A body that is not a JSON registration request, a `client_name` over
+/// [`MAX_CLIENT_NAME_CHARS`], more than [`MAX_REDIRECT_URIS`] redirect URIs,
+/// or one over [`MAX_REDIRECT_URI_BYTES`] gets a JSON 400
+/// `invalid_client_metadata` that does not echo the body.
 pub async fn register(
     State(state): State<Arc<OAuthEndpointState>>,
-    Json(req): Json<RegistrationRequest>,
+    req: Result<Json<RegistrationRequest>, JsonRejection>,
 ) -> Response {
+    let Ok(Json(req)) = req else {
+        tracing::debug!("POST /oauth/register: malformed body");
+        return bad_request(
+            "invalid_client_metadata",
+            "Malformed registration request: expected a JSON object with redirect_uris",
+        );
+    };
+    if let Some(description) = client_metadata_violation(&req) {
+        tracing::warn!(%description, "Dynamic client registration refused");
+        return bad_request("invalid_client_metadata", &description);
+    }
     tracing::debug!(
         client_name = ?req.client_name,
         redirect_uris = ?req.redirect_uris,
@@ -566,6 +657,45 @@ pub async fn register(
         })),
     )
         .into_response()
+}
+
+/// Returns why the sizes in `req` cannot be registered, or `None` when they
+/// can. Checked before anything else, so no oversized value is parsed,
+/// logged or stored.
+fn client_metadata_violation(req: &RegistrationRequest) -> Option<String> {
+    if req
+        .client_name
+        .as_ref()
+        .is_some_and(|name| name.chars().count() > MAX_CLIENT_NAME_CHARS)
+    {
+        return Some(format!(
+            "client_name must be at most {MAX_CLIENT_NAME_CHARS} characters"
+        ));
+    }
+    if req.redirect_uris.len() > MAX_REDIRECT_URIS {
+        return Some(format!(
+            "at most {MAX_REDIRECT_URIS} redirect_uris may be registered"
+        ));
+    }
+    if req
+        .redirect_uris
+        .iter()
+        .any(|uri| uri.len() > MAX_REDIRECT_URI_BYTES)
+    {
+        return Some(format!(
+            "each redirect_uri must be at most {MAX_REDIRECT_URI_BYTES} bytes"
+        ));
+    }
+    None
+}
+
+/// Whether `challenge` is a well-formed PKCE code challenge: 43 to 128
+/// characters, each `A-Z`, `a-z`, `0-9`, `-`, `.`, `_` or `~` (RFC 7636 §4.2).
+fn is_valid_code_challenge(challenge: &str) -> bool {
+    CODE_CHALLENGE_CHARS.contains(&challenge.len())
+        && challenge
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._~".contains(&byte))
 }
 
 /// Schemes a registered `redirect_uri` may not use: each can run script or

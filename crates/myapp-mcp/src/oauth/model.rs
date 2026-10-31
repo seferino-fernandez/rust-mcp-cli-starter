@@ -19,9 +19,9 @@ pub struct ApprovalForm {
 /// the consent form is posted with its nonce.
 #[derive(Clone, Debug)]
 pub struct PendingAuthorization {
+    /// The client, which must still be registered when the nonce is taken.
+    /// Its name is looked up when the consent page is rendered, not copied.
     pub client_id: String,
-    /// The name the client registered with, shown on the consent page.
-    pub client_name: Option<String>,
     /// The registered redirect URI exactly as the request named it. This is
     /// what the authorization code is bound to, because `/token` compares it
     /// byte for byte.
