@@ -427,9 +427,9 @@ fn read_resolved_config(
 /// The message itself still quotes the offending value for serde type and
 /// value errors (``invalid type: integer `123456`, expected a string``), so a
 /// secret written with the wrong type would leak through it. Everything from
-/// the first `"` or `` ` `` up to serde's final `, expected …` tail is
-/// therefore masked as [`MASKED_VALUE`](crate::secret::MASKED_VALUE); see
-/// [`mask_quoted_values`].
+/// the first `"` or `` ` `` up to serde's final `, expected …` tail, or to the
+/// end when that tail does not read as schema text, is therefore masked as
+/// [`MASKED_VALUE`](crate::secret::MASKED_VALUE); see [`mask_quoted_values`].
 fn describe_toml_error(text: &str, error: &toml::de::Error) -> String {
     let message = mask_quoted_values(error.message());
     let Some(span) = error.span() else {
@@ -450,19 +450,28 @@ fn describe_toml_error(text: &str, error: &toml::de::Error) -> String {
 /// Serde appends its expectation (variant or field names, a type) after the
 /// user's value, so the message is split at the last `, expected `, wherever it
 /// falls relative to quotes. The marker and everything after it are kept
-/// verbatim: ``unknown variant `********`, expected one of `token`, `oauth` ``.
-/// Without a marker the whole message is the part to mask.
+/// verbatim only when that tail has one of serde's schema forms (see
+/// [`is_schema_tail`]): ``unknown variant `********`, expected one of `token`,
+/// `oauth` ``. When it does not, the marker belongs to the user's value, as in
+/// ``unknown field `x, expected S`, there are no fields``, and the split is
+/// ignored. Without a kept tail the whole message is the part to mask.
 ///
 /// In that part, everything from the first `"` or `` ` `` to the end is masked
 /// as one span, keeping the opening delimiter and, when the part ends with it,
 /// the closing one. Delimiters are not paired, because serde does not escape a
 /// `` ` `` inside a backtick-quoted value, so a value holding one could
 /// otherwise close the span early and leave the rest of itself in clear.
+///
+/// One case still leaks: a value that itself ends in `, expected ` followed by
+/// a schema form, in a message where serde appends no expected clause of its
+/// own. The value ``x, expected `a`` quoted at the end of ``duplicate field
+/// `…` `` yields the tail `` `a` ``, a valid name list, so `a` stays in clear.
 fn mask_quoted_values(message: &str) -> String {
     const EXPECTED: &str = ", expected ";
-    let (value, schema) = message
-        .rsplit_once(EXPECTED)
-        .map_or((message, None), |(value, schema)| (value, Some(schema)));
+    let (value, schema) = match message.rsplit_once(EXPECTED) {
+        Some((value, schema)) if is_schema_tail(schema) => (value, Some(schema)),
+        _ => (message, None),
+    };
     let mut masked = String::with_capacity(message.len());
     let mut rest = value.chars();
     while let Some(c) = rest.next() {
@@ -480,6 +489,56 @@ fn mask_quoted_values(message: &str) -> String {
         masked.push_str(schema);
     }
     masked
+}
+
+/// Whether `tail`, the text after serde's `, expected `, has one of serde's
+/// schema forms.
+///
+/// The forms are a list of backtick-quoted names (`` `a` ``, `` `a` or `b` ``,
+/// ``one of `a`, `b`, `c` ``), each name drawn from `[A-Za-z0-9_.-]`, and a
+/// plain description such as `u16` or `an integer between 0 and 65535`, drawn
+/// from ASCII alphanumerics, spaces and `_-.,()`.
+fn is_schema_tail(tail: &str) -> bool {
+    is_name_list(tail.strip_prefix("one of ").unwrap_or(tail))
+        || (!tail.is_empty()
+            && tail.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.' | ',' | '(' | ')')
+            }))
+}
+
+/// Whether `list` is one or more backtick-quoted names separated by `, `, with
+/// at most one ` or `, between the last two, and nothing after the last name.
+fn is_name_list(list: &str) -> bool {
+    let mut rest = list;
+    let mut after_or = false;
+    loop {
+        let Some((name, after_name)) = rest
+            .strip_prefix('`')
+            .and_then(|quoted| quoted.split_once('`'))
+        else {
+            return false;
+        };
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        {
+            return false;
+        }
+        if after_name.is_empty() {
+            return true;
+        }
+        if after_or {
+            return false;
+        }
+        if let Some(next) = after_name.strip_prefix(" or ") {
+            after_or = true;
+            rest = next;
+        } else if let Some(next) = after_name.strip_prefix(", ") {
+            rest = next;
+        } else {
+            return false;
+        }
+    }
 }
 
 /// Reads a secret from a file, trimming trailing whitespace/newlines.
@@ -849,6 +908,92 @@ mod tests {
         assert_eq!(
             mask_quoted_values("missing field api_key"),
             "missing field api_key"
+        );
+    }
+
+    #[test]
+    fn mask_quoted_values_masks_a_marker_followed_by_a_non_schema_tail() {
+        let masked = mask_quoted_values("unknown field `x, expected S`, there are no fields");
+        assert_eq!(masked, "unknown field `********");
+        assert!(!masked.contains('S'), "{masked}");
+    }
+
+    #[test]
+    fn mask_quoted_values_masks_a_tail_holding_a_quote_outside_a_list() {
+        assert_eq!(
+            mask_quoted_values(r#"invalid value: "a, expected u16", SECRET"#),
+            r#"invalid value: "********"#
+        );
+        assert_eq!(
+            mask_quoted_values("unknown variant `a, expected `token` SECRET`"),
+            "unknown variant `********`"
+        );
+    }
+
+    #[test]
+    fn mask_quoted_values_keeps_each_name_list_form() {
+        for tail in [
+            "one of `token`, `oauth`, `none`",
+            "`token` or `oauth`",
+            "`token`",
+        ] {
+            assert_eq!(
+                mask_quoted_values(&format!("unknown variant `SENTINEL`, expected {tail}")),
+                format!("unknown variant `********`, expected {tail}")
+            );
+        }
+    }
+
+    #[test]
+    fn mask_quoted_values_keeps_a_type_description() {
+        for tail in ["u16", "a string"] {
+            assert_eq!(
+                mask_quoted_values(&format!(
+                    r#"invalid type: string "SENTINEL", expected {tail}"#
+                )),
+                format!(r#"invalid type: string "********", expected {tail}"#)
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_variant_round_trip_keeps_the_expected_text_but_not_the_value() {
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum Mode {
+            Token,
+            OAuth,
+            None,
+        }
+        #[derive(Debug, Deserialize)]
+        struct File {
+            #[expect(dead_code, reason = "only the parse error is under test")]
+            mode: Mode,
+        }
+
+        let text = "mode = \"SENTINEL\"\n";
+        let err = toml::from_str::<File>(text).unwrap_err();
+        assert_eq!(
+            describe_toml_error(text, &err),
+            "line 1, column 8: unknown variant `********`, expected one of `token`, `oauth`, `none`"
+        );
+    }
+
+    #[test]
+    fn wrong_type_round_trip_keeps_the_expected_text_but_not_the_value() {
+        #[derive(Debug, Deserialize)]
+        struct File {
+            #[expect(dead_code, reason = "only the parse error is under test")]
+            port: u16,
+        }
+
+        let text = "port = \"abc\"\n";
+        let err = toml::from_str::<File>(text).unwrap_err();
+        let described = describe_toml_error(text, &err);
+        assert!(!described.contains("abc"), "{described}");
+        assert_eq!(
+            described,
+            "line 1, column 8: invalid type: string \"********\", expected u16"
         );
     }
 
