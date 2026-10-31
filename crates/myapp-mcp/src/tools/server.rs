@@ -112,7 +112,7 @@ impl ServerHandler for AppTools {
     ) -> Result<CallToolResponse, McpError> {
         tracing::info!(tool = %request.name, "call_tool");
         if let Some(tool) = self.router.get(&request.name) {
-            if !scope::permits(&context, tool) {
+            if !scope::permits(&context, tool, self.require_scopes) {
                 tracing::warn!(tool = %request.name, "call_tool: token lacks the write scope");
                 return Ok(scope::insufficient_scope(&request.name).into());
             }
@@ -512,6 +512,44 @@ mod tests {
         ] {
             assert_eq!(listed_tools(&tools, caller).await, every_tool, "{caller:?}");
         }
+    }
+
+    /// Under OAuth the handler requires scopes, so a request that reaches it
+    /// without them, with or without HTTP request parts, fails closed to the
+    /// read-only tools. Without the requirement, the same requests reach
+    /// every tool.
+    #[tokio::test]
+    async fn oauth_handler_without_scopes_is_limited_to_read_only_tools() {
+        let server = upstream().await;
+        let oauth = tools_for(&server).with_require_scopes(true);
+
+        for caller in [Caller::NoOAuthToken, Caller::Stdio] {
+            for tool in oauth.router().list_all() {
+                let name = tool.name.as_ref();
+                let result = complete(call(&oauth, caller, name, valid_arguments(name)).await);
+                if is_read_only(&tool) {
+                    assert_succeeded(&result, &format!("{name} as {caller:?}"));
+                } else {
+                    assert_refused(&result, name);
+                }
+            }
+        }
+        assert_eq!(request_count(&server).await, 2 * 3, "only the reads ran");
+
+        let unrestricted = tools_for(&server);
+        for name in ["myapp_create_item", "myapp_delete_item"] {
+            let result = complete(
+                call(
+                    &unrestricted,
+                    Caller::NoOAuthToken,
+                    name,
+                    valid_arguments(name),
+                )
+                .await,
+            );
+            assert_succeeded(&result, name);
+        }
+        assert_eq!(request_count(&server).await, 2 * 3 + 2);
     }
 
     #[tokio::test]

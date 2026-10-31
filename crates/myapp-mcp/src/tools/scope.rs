@@ -8,10 +8,12 @@
 //! Only calls are checked: `tools/list` advertises every tool to every token,
 //! so a client's view of the server does not change with its grant.
 //!
-//! A request that carries no OAuth access token keeps full access by design.
 //! Only the OAuth bearer middleware inserts [`Scopes`]; the static-token and
 //! `none` HTTP modes and the stdio transport never do, because they grant no
-//! scopes to restrict.
+//! scopes to restrict, so their requests keep full access. A handler serving
+//! OAuth mode requires scopes instead: a request that reaches it without them,
+//! which the middleware should make impossible, counts as read-only, so a
+//! missing layer fails closed rather than open.
 
 use axum::http::request::Parts;
 use rmcp::RoleServer;
@@ -41,9 +43,18 @@ fn is_read_only(tool: &Tool) -> bool {
 /// Reports whether the request may call `tool`.
 ///
 /// Fails closed for OAuth requests: a token without `write` is allowed only
-/// tools whose `read_only_hint` is explicitly `true`.
-pub(super) fn permits(context: &RequestContext<RoleServer>, tool: &Tool) -> bool {
-    granted_scopes(context).is_none_or(|scopes| scopes.contains(Scope::Write) || is_read_only(tool))
+/// tools whose `read_only_hint` is explicitly `true`. When `require_scopes`
+/// is set, a request without scopes is treated as such a token; otherwise it
+/// is unrestricted.
+pub(super) fn permits(
+    context: &RequestContext<RoleServer>,
+    tool: &Tool,
+    require_scopes: bool,
+) -> bool {
+    match granted_scopes(context) {
+        Some(scopes) => scopes.contains(Scope::Write) || is_read_only(tool),
+        None => !require_scopes || is_read_only(tool),
+    }
 }
 
 /// Builds the tool error returned when the token lacks the `write` scope.
@@ -106,13 +117,14 @@ mod tests {
         let context = context_for(Some(&["read"]));
         for (case, tool) in unannotated_tools() {
             assert!(
-                !permits(&context, &tool),
+                !permits(&context, &tool, false),
                 "a tool with {case} must not count as read-only"
             );
         }
         assert!(!permits(
             &context,
-            &tool_annotated(Some(ToolAnnotations::new().read_only(false)))
+            &tool_annotated(Some(ToolAnnotations::new().read_only(false))),
+            false
         ));
     }
 
@@ -127,7 +139,7 @@ mod tests {
         ] {
             for (case, tool) in unannotated_tools() {
                 assert!(
-                    permits(&context, &tool),
+                    permits(&context, &tool, false),
                     "{caller} must be permitted a tool with {case}"
                 );
             }
@@ -141,7 +153,37 @@ mod tests {
         let context = context_for(Some(&["read"]));
         assert!(permits(
             &context,
-            &tool_annotated(Some(ToolAnnotations::new().read_only(true)))
+            &tool_annotated(Some(ToolAnnotations::new().read_only(true))),
+            false
         ));
+    }
+
+    /// With scopes required, a request missing them, whether it lacks the
+    /// HTTP request parts entirely or only the scopes, is limited to
+    /// read-only tools, and an unset hint still fails closed.
+    #[tokio::test]
+    async fn required_scopes_fail_closed_when_missing() {
+        let mut without_parts = context_for(None);
+        without_parts.extensions = rmcp::model::Extensions::default();
+        for (case, context) in [
+            ("no request parts", without_parts),
+            ("no scopes", context_for(None)),
+        ] {
+            assert!(
+                permits(
+                    &context,
+                    &tool_annotated(Some(ToolAnnotations::new().read_only(true))),
+                    true
+                ),
+                "{case}: read-only tools stay allowed"
+            );
+            for (hint, tool) in unannotated_tools() {
+                assert!(!permits(&context, &tool, true), "{case}: {hint}");
+            }
+        }
+        assert!(
+            permits(&context_for(Some(&["write"])), &tool_annotated(None), true),
+            "a write token is unaffected"
+        );
     }
 }

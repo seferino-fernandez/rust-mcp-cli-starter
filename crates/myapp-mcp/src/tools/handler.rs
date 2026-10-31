@@ -33,12 +33,17 @@ pub struct Inner {
     /// cannot hold that diagnostic, a protocol error.
     pub(super) max_response_bytes: usize,
     /// Whether destructive tools ask capable clients for confirmation first.
-    pub(super) confirm_destructive: bool,
+    pub(crate) confirm_destructive: bool,
+    /// Whether every call must carry OAuth [`Scopes`](crate::auth::Scopes).
+    /// Set when the HTTP transport authenticates with OAuth, so a request
+    /// that somehow reaches a tool without them is limited to read-only
+    /// tools rather than allowed everything.
+    pub(crate) require_scopes: bool,
 }
 
 impl AppTools {
     /// Builds a handler around an already-constructed client, with
-    /// destructive-tool confirmation on.
+    /// destructive-tool confirmation on and OAuth scopes not required.
     ///
     /// Combines every tool router and closes each tool's schemas once, so
     /// requests never rebuild routes or copy schemas. Build once per server
@@ -58,6 +63,7 @@ impl AppTools {
             advertised,
             max_response_bytes,
             confirm_destructive: true,
+            require_scopes: false,
         }))
     }
 
@@ -67,6 +73,15 @@ impl AppTools {
     pub fn with_confirm_destructive(mut self, enabled: bool) -> Self {
         // Unshared right after `new`, so this updates in place.
         Arc::make_mut(&mut self.0).confirm_destructive = enabled;
+        self
+    }
+
+    /// Requires OAuth scopes on every call, failing closed to read-only tools
+    /// when a request carries none. Set for the HTTP transport's OAuth mode;
+    /// stdio and the `token` and `none` modes leave it off.
+    #[must_use]
+    pub fn with_require_scopes(mut self, required: bool) -> Self {
+        Arc::make_mut(&mut self.0).require_scopes = required;
         self
     }
 

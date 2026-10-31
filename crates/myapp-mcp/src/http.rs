@@ -179,12 +179,23 @@ fn service_factory(
     move || Ok(tools.clone())
 }
 
+/// Builds the one tool handler the HTTP transport serves. Under OAuth it
+/// requires scopes on every call, so a request that reaches a tool without
+/// them is limited to read-only tools; the `token` and `none` modes grant no
+/// scopes and leave every tool callable.
+fn http_tools(config: &ServerConfig, auth: &HttpAuth) -> anyhow::Result<AppTools> {
+    Ok(
+        AppTools::new(create_api_client(config)?, config.mcp.max_response_bytes)
+            .with_confirm_destructive(config.mcp.confirm_destructive)
+            .with_require_scopes(matches!(auth, HttpAuth::OAuth(_))),
+    )
+}
+
 pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     let addr = listen_addr(&config.mcp.host, config.mcp.port)?;
     let auth = HttpAuth::resolve(config, &addr)?;
 
-    let tools = AppTools::new(create_api_client(config)?, config.mcp.max_response_bytes)
-        .with_confirm_destructive(config.mcp.confirm_destructive);
+    let tools = http_tools(config, &auth)?;
 
     let cancellation_token = CancellationToken::new();
     let session_manager: Arc<LocalSessionManager> = Arc::default();
@@ -692,6 +703,29 @@ mod tests {
             panic!("auth_mode=token must resolve to HttpAuth::Token");
         };
         assert_eq!(token.expose_secret(), "s3cret");
+    }
+
+    /// Only the OAuth mode's handler requires scopes.
+    #[test]
+    fn http_tools_require_scopes_only_under_oauth() {
+        let mut config = ServerConfig::default();
+        config.core.api_key = Some(SecretString::from("test-key"));
+        config.mcp.confirm_destructive = false;
+        for (auth, required) in [
+            (
+                HttpAuth::OAuth(OAuthSettings {
+                    base_url: "http://127.0.0.1:8080".to_string(),
+                    pin: None,
+                }),
+                true,
+            ),
+            (HttpAuth::Token(SecretString::from("s3cret")), false),
+            (HttpAuth::None, false),
+        ] {
+            let tools = http_tools(&config, &auth).unwrap();
+            assert_eq!(tools.require_scopes, required, "{auth:?}");
+            assert!(!tools.confirm_destructive, "{auth:?}");
+        }
     }
 
     fn addr(s: &str) -> SocketAddr {
