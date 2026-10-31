@@ -426,10 +426,10 @@ fn read_resolved_config(
 ///
 /// The message itself still quotes the offending value for serde type and
 /// value errors (``invalid type: integer `123456`, expected a string``), so a
-/// secret written with the wrong type would leak through it. Every `"…"` and
-/// `` `…` `` span before the schema's `, expected …` tail is therefore masked
-/// as [`MASKED_VALUE`](crate::secret::MASKED_VALUE), keeping the delimiters; an
-/// unterminated delimiter masks to the end.
+/// secret written with the wrong type would leak through it. Everything from
+/// the first `"` or `` ` `` up to serde's final `, expected …` tail is
+/// therefore masked as [`MASKED_VALUE`](crate::secret::MASKED_VALUE); see
+/// [`mask_quoted_values`].
 fn describe_toml_error(text: &str, error: &toml::de::Error) -> String {
     let message = mask_quoted_values(error.message());
     let Some(span) = error.span() else {
@@ -444,48 +444,40 @@ fn describe_toml_error(text: &str, error: &toml::de::Error) -> String {
     format!("line {line}, column {column}: {message}")
 }
 
-/// Replaces the content of every `"…"` and `` `…` `` span with
-/// [`MASKED_VALUE`](crate::secret::MASKED_VALUE), up to the first unquoted
-/// `, expected `.
+/// Masks the user's value in a serde message as
+/// [`MASKED_VALUE`](crate::secret::MASKED_VALUE), keeping serde's schema text.
 ///
-/// Serde puts the user's value before `, expected ` and the schema's
-/// expectation (variant or field names, a type) after it, so that tail is kept
+/// Serde appends its expectation (variant or field names, a type) after the
+/// user's value, so the message is split at the last `, expected `, wherever it
+/// falls relative to quotes. The marker and everything after it are kept
 /// verbatim: ``unknown variant `********`, expected one of `token`, `oauth` ``.
-/// The marker is only honoured outside a quoted span, so a value containing it
-/// is still masked whole.
+/// Without a marker the whole message is the part to mask.
 ///
-/// Serde quotes string values with `Debug`, so a `"` inside a `"…"` span is
-/// escaped as `\"`; a backslash there skips the next character instead of
-/// letting an embedded quote end the span early.
+/// In that part, everything from the first `"` or `` ` `` to the end is masked
+/// as one span, keeping the opening delimiter and, when the part ends with it,
+/// the closing one. Delimiters are not paired, because serde does not escape a
+/// `` ` `` inside a backtick-quoted value, so a value holding one could
+/// otherwise close the span early and leave the rest of itself in clear.
 fn mask_quoted_values(message: &str) -> String {
     const EXPECTED: &str = ", expected ";
+    let (value, schema) = message
+        .rsplit_once(EXPECTED)
+        .map_or((message, None), |(value, schema)| (value, Some(schema)));
     let mut masked = String::with_capacity(message.len());
-    let mut open: Option<char> = None;
-    let mut escaped = false;
-    for (index, c) in message.char_indices() {
-        match open {
-            None => {
-                if let Some(tail) = message
-                    .get(index..)
-                    .filter(|rest| rest.starts_with(EXPECTED))
-                {
-                    masked.push_str(tail);
-                    break;
-                }
+    let mut rest = value.chars();
+    while let Some(c) = rest.next() {
+        masked.push(c);
+        if c == '"' || c == '`' {
+            masked.push_str(crate::secret::MASKED_VALUE);
+            if rest.as_str().ends_with(c) {
                 masked.push(c);
-                if c == '"' || c == '`' {
-                    masked.push_str(crate::secret::MASKED_VALUE);
-                    open = Some(c);
-                }
             }
-            Some(_) if escaped => escaped = false,
-            Some('"') if c == '\\' => escaped = true,
-            Some(delimiter) if c == delimiter => {
-                masked.push(c);
-                open = None;
-            }
-            Some(_) => {}
+            break;
         }
+    }
+    if let Some(schema) = schema {
+        masked.push_str(EXPECTED);
+        masked.push_str(schema);
     }
     masked
 }
@@ -826,10 +818,63 @@ mod tests {
             ),
             "unknown variant `********`, expected one of `token`, `oauth`, `none`"
         );
-        // The marker inside a quoted value does not end masking early.
+    }
+
+    #[test]
+    fn mask_quoted_values_masks_a_marker_inside_a_double_quoted_value() {
         assert_eq!(
             mask_quoted_values(r#"invalid type: string "a, expected SENTINEL", expected u16"#),
             r#"invalid type: string "********", expected u16"#
+        );
+    }
+
+    #[test]
+    fn mask_quoted_values_masks_a_backtick_injected_marker() {
+        // Serde does not escape the backtick in the value ``x`, expected SECRET``.
+        let masked = mask_quoted_values(
+            "unknown variant `x`, expected SECRET`, expected one of `token`, `oauth`, `none`",
+        );
+        assert_eq!(
+            masked,
+            "unknown variant `********`, expected one of `token`, `oauth`, `none`"
+        );
+    }
+
+    #[test]
+    fn mask_quoted_values_without_a_marker_masks_from_the_first_delimiter() {
+        assert_eq!(
+            mask_quoted_values("unknown field `a`b`, there are no fields"),
+            "unknown field `********"
+        );
+        assert_eq!(
+            mask_quoted_values("missing field api_key"),
+            "missing field api_key"
+        );
+    }
+
+    #[test]
+    fn backtick_injected_variant_names_the_valid_variants_but_not_the_value() {
+        #[derive(Debug, Default, Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum Mode {
+            #[default]
+            Token,
+            OAuth,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct File {
+            #[serde(default)]
+            #[expect(dead_code, reason = "only the parse error is under test")]
+            mode: Mode,
+        }
+
+        let text = "mode = \"x`, expected SECRET\"\n";
+        let err = toml::from_str::<File>(text).unwrap_err();
+        let described = describe_toml_error(text, &err);
+        assert!(!described.contains("SECRET"), "{described}");
+        assert!(
+            described.contains("expected `token` or `oauth`"),
+            "{described}"
         );
     }
 
