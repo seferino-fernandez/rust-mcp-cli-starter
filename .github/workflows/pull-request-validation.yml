@@ -38,6 +38,14 @@ jobs:
             - name: Run tests
               run: cargo nextest run --all-targets --all-features
 
+            - name: Run doc tests
+              run: cargo test --doc
+
+            - name: Build docs
+              run: cargo doc --no-deps --all-features
+              env:
+                  RUSTDOCFLAGS: -D warnings
+
     lint:
         runs-on: ubuntu-latest
         steps:
