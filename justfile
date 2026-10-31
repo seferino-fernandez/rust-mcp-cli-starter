@@ -1,18 +1,23 @@
 default:
     @just --list
 
-# Full gate: formatting, lints, locked check, and the whole test matrix (mirrors CI)
+# Full gate: formatting, lints, locked check, the whole test matrix, and the docs build (mirrors CI)
 verify:
 	cargo fmt --all --check
 	cargo clippy --all-targets --all-features -- -D warnings
 	cargo check --locked
 	just test
+	just doc
 
 # Run all tests: full feature matrix, default features, and doctests
 test:
 	cargo nextest run --all-targets --all-features
 	cargo nextest run
 	cargo test --doc
+
+# Build API docs, failing on rustdoc warnings
+doc:
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
 # Run live integration tests against a real API instance
 # (set MYAPP_BASE_URL and MYAPP_API_KEY first).
