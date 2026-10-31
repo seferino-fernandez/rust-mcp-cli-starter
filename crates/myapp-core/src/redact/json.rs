@@ -50,8 +50,10 @@ pub(crate) fn redact_json(value: &mut serde_json::Value) {
 }
 
 /// Replaces every string in `value`, at any depth, with [`MASKED_VALUE`],
-/// leaving numbers, booleans, null and object keys as they are. Keys get
-/// the free-text rules, as everywhere else.
+/// leaving numbers, booleans and null as they are. Every object key inside
+/// becomes [`MASKED_VALUE`] too, suffixed ` (2)`, ` (3)`, … by
+/// [`rename_keys`], since a map under a sensitive key may be keyed by the
+/// secrets themselves.
 fn mask_strings(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(string) => *string = MASKED_VALUE.to_string(),
@@ -64,10 +66,7 @@ fn mask_strings(value: &mut serde_json::Value) {
             for value in object.values_mut() {
                 mask_strings(value);
             }
-            rename_keys(object, |key| match redact_free_text(key) {
-                Cow::Borrowed(_) => None,
-                Cow::Owned(redacted) => Some(redacted),
-            });
+            rename_keys(object, |_| Some(MASKED_VALUE.to_string()));
         }
         _ => {}
     }

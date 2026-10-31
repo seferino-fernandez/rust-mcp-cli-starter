@@ -19,10 +19,11 @@ use super::{
 /// Masks credentials in free text, borrowing `text` when nothing is masked.
 ///
 /// Text that holds no `@` or `%` and, ignoring `-`, `_` and ASCII case, none
-/// of `key`, `pass`, `pwd`, `secret`, `token`, `authorization`,
-/// `credential` or `cookie` is returned at once: every sensitive key and header name holds
-/// one of those words, a percent-encoded key needs a `%`, and user
-/// information needs an `@`, so no rule can mask it. Other text goes through
+/// of `key`, `pass`, `pwd`, `secret`, `signature`, `token`,
+/// `authorization`, `credential` or `cookie` is returned at once: every
+/// sensitive key and header name holds one of those words, a percent-encoded
+/// key needs a `%`, and user information needs an `@`, so no rule can mask
+/// it. Other text goes through
 /// [`mask_free_text`].
 pub(super) fn redact_free_text(text: &str) -> Cow<'_, str> {
     if may_hold_credentials(text) {
@@ -40,7 +41,7 @@ fn may_hold_credentials(text: &str) -> bool {
 /// The words, in lower case, one of which every sensitive key and header
 /// name holds once `-` and `_` are removed, each packed by
 /// [`pack_key_word`].
-const KEY_WORDS: [(u128, u128); 8] = [
+const KEY_WORDS: [(u128, u128); 9] = [
     pack_key_word(b"key"),
     pack_key_word(b"pass"),
     pack_key_word(b"secret"),
@@ -49,6 +50,7 @@ const KEY_WORDS: [(u128, u128); 8] = [
     pack_key_word(b"credential"),
     pack_key_word(b"cookie"),
     pack_key_word(b"pwd"),
+    pack_key_word(b"signature"),
 ];
 
 /// Packs up to 16 bytes into the low bytes of a `u128`, last byte lowest,
@@ -393,6 +395,7 @@ struct PairValue {
 /// Keys come in order, so the value ends and the brackets before each key
 /// are found by scans that only move forward.
 fn sensitive_pair_values(token: &str) -> Vec<PairValue> {
+    let quotes = QuoteCounts::new(token);
     let mut values = Vec::new();
     let mut query_value_end = NextByte::new(token, b"&#");
     let mut semicolon_value_end = NextByte::new(token, b"&;#");
@@ -443,7 +446,7 @@ fn sensitive_pair_values(token: &str) -> Vec<PairValue> {
             value_start..value_end
         };
         let value = if quote_len == 1 {
-            unquoted(token, value)
+            unquoted(token, value, &quotes)
         } else {
             value
         };
@@ -772,15 +775,17 @@ fn mask_values_after_key_tokens(
         .filter(|&(_, character)| is_line_break(character))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
+    let quotes = QuoteCounts::new(text);
     let mut line_masked_to = 0;
     for index in 0..tokens.len() {
-        masks.extend(value_after_key_token(text, tokens, index));
+        masks.extend(value_after_key_token(text, tokens, index, &quotes));
         masks.extend(header_credentials(
             text,
             tokens,
             index,
             &line_breaks,
             &mut line_masked_to,
+            &quotes,
         ));
     }
 }
@@ -808,6 +813,7 @@ fn value_after_key_token(
     text: &str,
     tokens: &[Range<usize>],
     index: usize,
+    quotes: &QuoteCounts,
 ) -> Option<Range<usize>> {
     let current = text.get(tokens.get(index)?.clone())?;
     let next = tokens.get(index.saturating_add(1))?;
@@ -831,6 +837,7 @@ fn value_after_key_token(
     Some(unquoted(
         text,
         without_closing_bracket(text, value, opens(key.get(..key_start)?)),
+        quotes,
     ))
 }
 
@@ -847,8 +854,9 @@ fn value_after_key_token(
 /// holds an odd number of that quote, so it closes a string opened before
 /// the value, as in `S"` from `"Bearer S"`, rather than one inside it, as in
 /// `response="S"`. Otherwise the value is kept whole, trailing `,` and `;`
-/// included.
-fn unquoted(text: &str, value: Range<usize>) -> Range<usize> {
+/// included. `quotes` counts the quotes of `text`, so the parity costs the
+/// same whatever the value's length.
+fn unquoted(text: &str, value: Range<usize>, quotes: &QuoteCounts) -> Range<usize> {
     let Some(content) = text.get(value.clone()) else {
         return value;
     };
@@ -875,14 +883,67 @@ fn unquoted(text: &str, value: Range<usize>) -> Range<usize> {
         };
     }
     let before_separators = content.trim_end_matches([',', ';']);
+    let separators_start = value.start.saturating_add(before_separators.len());
     match before_separators.chars().next_back() {
-        Some(quote @ ('\'' | '`' | '"')) if before_separators.matches(quote).count() % 2 == 1 => {
+        Some(quote @ ('\'' | '`' | '"'))
+            if quotes.count(quote, value.start..separators_start) % 2 == 1 =>
+        {
             value.start
                 ..value
                     .start
                     .saturating_add(before_separators.len().saturating_sub(1))
         }
         _ => value,
+    }
+}
+
+/// Running counts of `'`, `` ` `` and `"` in a text, so the number of each in
+/// any range is found in constant time.
+struct QuoteCounts(Vec<[usize; 3]>);
+
+impl QuoteCounts {
+    /// The quotes ever counted, in the order of the counts.
+    const QUOTES: [u8; 3] = *b"'`\"";
+
+    /// Counts the quotes of `text` once. A text without quotes keeps no
+    /// counts at all.
+    fn new(text: &str) -> Self {
+        let bytes = text.as_bytes();
+        if !bytes.iter().any(|byte| Self::QUOTES.contains(byte)) {
+            return Self(Vec::new());
+        }
+        let mut counts = Vec::with_capacity(bytes.len().saturating_add(1));
+        let mut running = [0_usize; 3];
+        counts.push(running);
+        for byte in bytes {
+            if let Some(count) = Self::QUOTES
+                .iter()
+                .position(|quote| quote == byte)
+                .and_then(|index| running.get_mut(index))
+            {
+                *count = count.saturating_add(1);
+            }
+            counts.push(running);
+        }
+        Self(counts)
+    }
+
+    /// How many `quote`s the byte range `range` of the text holds.
+    fn count(&self, quote: char, range: Range<usize>) -> usize {
+        let Some(index) = Self::QUOTES
+            .iter()
+            .position(|&candidate| char::from(candidate) == quote)
+        else {
+            return 0;
+        };
+        let at = |position: usize| {
+            self.0
+                .get(position)
+                .and_then(|counts| counts.get(index))
+                .copied()
+                .unwrap_or_default()
+        };
+        at(range.end).saturating_sub(at(range.start))
     }
 }
 
@@ -939,6 +1000,7 @@ fn header_credentials(
     index: usize,
     line_breaks: &[usize],
     line_masked_to: &mut usize,
+    quotes: &QuoteCounts,
 ) -> Vec<Range<usize>> {
     let Some(HeaderWord {
         header,
@@ -950,7 +1012,7 @@ fn header_credentials(
     else {
         return Vec::new();
     };
-    let word = unquoted(text, word);
+    let word = unquoted(text, word, quotes);
     let follow = tokens.get(word_token.saturating_add(1)).cloned();
     let follows_on_the_same_line = follow.as_ref().is_some_and(|follow| {
         !text
@@ -996,17 +1058,35 @@ fn header_credentials(
         credentials.push(unquoted(
             text,
             without_closing_bracket(text, last, opens(before_name)),
+            quotes,
         ));
     }
     credentials
 }
 
 /// The range from `start` to the end of its line, without trailing
-/// whitespace. `line_breaks` holds the position of every line break in
-/// `text`, in order.
+/// whitespace. A following line that starts with a space or a tab folds the
+/// header onto it, as in HTTP/1.1 and email headers, so the range runs on to
+/// the end of that line too. `line_breaks` holds the position of every line
+/// break in `text`, in order.
 fn to_line_end(text: &str, line_breaks: &[usize], start: usize) -> Range<usize> {
-    let next_break = line_breaks.partition_point(|&line_break| line_break < start);
-    let end = line_breaks.get(next_break).copied().unwrap_or(text.len());
+    let mut next_break = line_breaks.partition_point(|&line_break| line_break < start);
+    let end = loop {
+        let Some(&line_break) = line_breaks.get(next_break) else {
+            break text.len();
+        };
+        let after_break = text.get(line_break..).unwrap_or_default();
+        let next_line = after_break.strip_prefix("\r\n").unwrap_or_else(|| {
+            let mut characters = after_break.chars();
+            characters.next();
+            characters.as_str()
+        });
+        if !next_line.starts_with([' ', '\t']) {
+            break line_break;
+        }
+        let next_line_start = text.len().saturating_sub(next_line.len());
+        next_break = line_breaks.partition_point(|&line_break| line_break < next_line_start);
+    };
     let kept = text.get(start..end).map_or(0, |line| line.trim_end().len());
     start..start.saturating_add(kept)
 }

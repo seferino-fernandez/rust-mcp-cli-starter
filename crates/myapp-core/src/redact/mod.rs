@@ -167,7 +167,7 @@ pub fn redact_text(text: &str) -> Cow<'_, str> {
 }
 
 /// The sensitive keys, in lower case.
-const SENSITIVE_KEYS: [&str; 17] = [
+const SENSITIVE_KEYS: [&str; 18] = [
     "apikey",
     "api_key",
     "apitoken",
@@ -185,10 +185,13 @@ const SENSITIVE_KEYS: [&str; 17] = [
     "passphrase",
     "passwd",
     "pwd",
+    "signature",
 ];
 
-/// The sensitive key that never matches with an `s` added: `tokens` is
-/// nearly always a count, as in `maxTokens`.
+/// The sensitive key that matches with an `s` added only as an object key:
+/// in free text `tokens` is nearly always a count, as in `tokens used: 4096`,
+/// while an object key such as `refreshTokens` may hold strings, and only
+/// strings are masked there.
 const COUNTED_KEY: &str = "token";
 
 /// The length of the longest of the [`SENSITIVE_KEYS`].
@@ -216,9 +219,11 @@ fn is_sensitive_key(key: &str) -> bool {
 
 /// Matches an object key whose value is a credential, with the same rule as
 /// free text: a sensitive key, a compound, camelCase or header name ending in
-/// one, or an `Authorization` or `Proxy-Authorization` header name.
+/// one, or an `Authorization` or `Proxy-Authorization` header name. Only
+/// here does `tokens` match too, as in `refreshTokens`; a count under such a
+/// key, as in `maxTokens: 4096`, is a number and is never masked.
 fn is_sensitive_object_key(key: &str) -> bool {
-    is_sensitive_free_text_key(key) || free_text::is_authorization_name(key)
+    is_sensitive_key_name(key, true) || free_text::is_authorization_name(key)
 }
 
 /// Matches a sensitive key, or a compound, camelCase or header name that
@@ -230,7 +235,8 @@ fn is_sensitive_object_key(key: &str) -> bool {
 /// is followed by an upper-case one, or an upper-case letter is followed by
 /// an upper-case one and then a lower-case one. The name matches when its
 /// parts, or some trailing run of them, joined, are a sensitive key or a
-/// sensitive key other than `token` followed by `s`, compared in any case.
+/// sensitive key other than `token` followed by `s`, compared in any case;
+/// object keys also accept `tokens` (see [`is_sensitive_object_key`]).
 /// So `X-Api-Key`, `apiKey` and `apiKeys` name `apikey`,
 /// `AWS_SECRET_ACCESS_KEY` ends in `accesskey`, and `access_token`,
 /// `X-Auth-Token`, `accessToken` and `sessionToken` end in `token`, but
@@ -242,6 +248,12 @@ fn is_sensitive_object_key(key: &str) -> bool {
 /// a part is compared as it is read, so nothing is allocated unless the
 /// name holds a `%`.
 pub(crate) fn is_sensitive_free_text_key(key: &str) -> bool {
+    is_sensitive_key_name(key, false)
+}
+
+/// [`is_sensitive_free_text_key`], also matching [`COUNTED_KEY`] followed by
+/// `s` when `counted_plural` is set.
+fn is_sensitive_key_name(key: &str, counted_plural: bool) -> bool {
     let decoded = percent_decoded(key);
     let key = decoded.as_ref();
     let name = key
@@ -263,7 +275,11 @@ pub(crate) fn is_sensitive_free_text_key(key: &str) -> bool {
         if let Some(slot) = tail.get_mut(start) {
             *slot = byte;
         }
-        if starts_part(bytes, index) && tail.get(start..).is_some_and(is_sensitive_run) {
+        if starts_part(bytes, index)
+            && tail
+                .get(start..)
+                .is_some_and(|run| is_sensitive_run(run, counted_plural))
+        {
             return true;
         }
     }
@@ -288,16 +304,17 @@ fn starts_part(bytes: &[u8], index: usize) -> bool {
 }
 
 /// Whether `run`, a key without `-` and `_`, is a sensitive key or a
-/// sensitive key other than [`COUNTED_KEY`] followed by `s`, compared in any
-/// case.
-fn is_sensitive_run(run: &[u8]) -> bool {
+/// sensitive key followed by `s`, compared in any case. [`COUNTED_KEY`]
+/// followed by `s` matches only when `counted_plural` is set.
+fn is_sensitive_run(run: &[u8], counted_plural: bool) -> bool {
     let singular = match run.split_last() {
         Some((last, rest)) if last.eq_ignore_ascii_case(&b's') => Some(rest),
         _ => None,
     };
     SENSITIVE_KEYS.iter().any(|sensitive| {
         let sensitive = sensitive.as_bytes();
-        let plural_allowed = !sensitive.eq_ignore_ascii_case(COUNTED_KEY.as_bytes());
+        let plural_allowed =
+            counted_plural || !sensitive.eq_ignore_ascii_case(COUNTED_KEY.as_bytes());
         sensitive.eq_ignore_ascii_case(run)
             || (plural_allowed
                 && singular.is_some_and(|singular| sensitive.eq_ignore_ascii_case(singular)))
@@ -439,11 +456,88 @@ mod tests {
             serde_json::json!({
                 "apiKeys": [MASKED_VALUE, MASKED_VALUE, 3, true, null],
                 "secrets": {
-                    "first": MASKED_VALUE,
-                    "count": 2,
-                    "nested": [MASKED_VALUE, { "deep": MASKED_VALUE }]
+                    "********": 2,
+                    "******** (2)": MASKED_VALUE,
+                    "******** (3)": [MASKED_VALUE, { "********": MASKED_VALUE }]
                 }
             })
+        );
+    }
+
+    #[test]
+    fn plural_tokens_object_keys_mask_strings_and_keep_counts() {
+        let data = serde_json::json!({
+            "tokens": "abc",
+            "refreshTokens": ["a", "b"],
+            "maxTokens": 4096,
+            "tokensUsed": 12
+        });
+
+        assert_eq!(
+            redacted_value(&data),
+            serde_json::json!({
+                "tokens": MASKED_VALUE,
+                "refreshTokens": [MASKED_VALUE, MASKED_VALUE],
+                "maxTokens": 4096,
+                "tokensUsed": 12
+            })
+        );
+    }
+
+    #[test]
+    fn plural_tokens_stay_readable_in_free_text() {
+        for text in ["tokens used: 4096", "maxTokens=4096", "tokens=12"] {
+            assert_eq!(redact_text(text), text);
+        }
+    }
+
+    #[test]
+    fn keys_of_an_object_under_a_sensitive_key_are_masked() {
+        let data = serde_json::json!({
+            "apiKeys": { "sk_live_x": true, "sk_live_y": 2, "sk_live_z": { "inner_key": "S" } },
+            "name": { "sk_live_visible": 1 }
+        });
+
+        let value = redacted_value(&data);
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "apiKeys": {
+                    "********": true,
+                    "******** (2)": 2,
+                    "******** (3)": { "********": MASKED_VALUE }
+                },
+                "name": { "sk_live_visible": 1 }
+            })
+        );
+        let shown = value["apiKeys"].to_string();
+        assert!(!shown.contains("sk_live"), "{shown}");
+    }
+
+    #[test]
+    fn signature_keys_are_sensitive() {
+        let data = serde_json::json!({
+            "signature": "S",
+            "requestSignature": "S",
+            "signatures": ["S"],
+            "signatureVersion": "4",
+            "hasSignature": true
+        });
+
+        assert_eq!(
+            redacted_value(&data),
+            serde_json::json!({
+                "signature": MASKED_VALUE,
+                "requestSignature": MASKED_VALUE,
+                "signatures": [MASKED_VALUE],
+                "signatureVersion": "4",
+                "hasSignature": true
+            })
+        );
+        assert_eq!(
+            redact_text("X-Amz-Signature=S&X-Amz-Date=1"),
+            "X-Amz-Signature=********&X-Amz-Date=1"
         );
     }
 
@@ -779,6 +873,10 @@ mod tests {
         let encoded_user_info = "url=https%3A%2F%2Fu%3Atok_2%40h ".repeat(2_048);
         let glued_encoded = "%3Ftoken%3Dt".repeat(5_461);
         let aws_headers = "Authorization: AWS4-HMAC-SHA256 ".repeat(1_985);
+        let odd_double_quotes = "'token'=a\"".repeat(6_553);
+        let odd_single_quotes = "'token'=a'".repeat(6_553);
+        let odd_backticks = "`token`=a`".repeat(6_553);
+        let folded_headers = "Authorization: AWS4 x\n ".repeat(2_978);
 
         for (name, input) in [
             ("K: 64 KiB of // before one @", slashes_before_one_at),
@@ -799,6 +897,10 @@ mod tests {
             ("T: 64 KiB of encoded user information", encoded_user_info),
             ("U: 64 KiB of one glued encoded token", glued_encoded),
             ("V: 64 KiB of AWS signature headers", aws_headers),
+            ("W: 64 KiB of '-quoted keys before a \"", odd_double_quotes),
+            ("X: 64 KiB of '-quoted keys before a '", odd_single_quotes),
+            ("Y: 64 KiB of `-quoted keys before a `", odd_backticks),
+            ("Z: 64 KiB of folded header lines", folded_headers),
         ] {
             let start = Instant::now();
             let redacted = redact_text(&input);
@@ -808,6 +910,46 @@ mod tests {
             assert!(
                 elapsed < Duration::from_millis(500),
                 "{name} took {elapsed:?}"
+            );
+        }
+    }
+
+    /// The fastest of three runs of [`redact_text`] over `input`.
+    fn fastest_redaction(input: &str) -> Duration {
+        (0..3)
+            .map(|_| {
+                let start = Instant::now();
+                let redacted = redact_text(input);
+                let elapsed = start.elapsed();
+                assert!(!redacted.is_empty());
+                elapsed
+            })
+            .min()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn quoted_key_parity_scales_linearly() {
+        // A build-independent guard: eight times the input must take less
+        // than sixteen times as long. A count of quotes per key over the
+        // rest of the token made these grow with the square of their length.
+        for (name, unit) in [
+            ("'-quoted keys before a \"", "'token'=a\""),
+            ("'-quoted keys before a '", "'token'=a'"),
+            ("`-quoted keys before a `", "`token`=a`"),
+        ] {
+            let small = unit.repeat(2_048);
+            let large = unit.repeat(16_384);
+            let small_time = fastest_redaction(&small);
+            let large_time = fastest_redaction(&large);
+            eprintln!(
+                "{name}: {} bytes in {small_time:?}, {} bytes in {large_time:?}",
+                small.len(),
+                large.len()
+            );
+            assert!(
+                large_time < small_time.saturating_mul(16),
+                "{name}: 8x input took {large_time:?} against {small_time:?}"
             );
         }
     }
@@ -1601,9 +1743,9 @@ mod tests {
             "Authorization: ********\n********",
         ),
         (
-            "authorization_word_with_the_token_after_it_past_a_carriage_return_masks_both",
+            "authorization_word_folded_past_a_carriage_return_is_masked_with_its_continuation",
             "Authorization: Bearer\r SECRET9",
-            "Authorization: ********\r ********",
+            "Authorization: ********",
         ),
         (
             "authorization_credential_before_a_vertical_tab_masks_both",
@@ -1829,6 +1971,26 @@ mod tests {
             "prefilter_passes_url_user_info",
             "https://u:p@h",
             "https://u:********@h",
+        ),
+        (
+            "folded_authorization_header_is_masked_onto_its_continuation_lines",
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x,\n Signature=tok_10\nnext: line",
+            "Authorization: ********\nnext: line",
+        ),
+        (
+            "folded_authorization_header_with_a_tab_and_crlf_is_masked",
+            "Authorization: Basic abc\r\n\tdef\r\nHost: h",
+            "Authorization: Basic ********\r\nHost: h",
+        ),
+        (
+            "unfolded_next_line_after_an_authorization_header_stays_readable",
+            "Authorization: Basic abc\nHost: h",
+            "Authorization: Basic ********\nHost: h",
+        ),
+        (
+            "folded_cookie_header_is_masked_onto_its_continuation_line",
+            "Cookie: a=S1;\n b=S2\nHost: h",
+            "Cookie: ********\nHost: h",
         ),
         (
             "nested_encoded_url_query_value_is_masked",
