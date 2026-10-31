@@ -64,11 +64,41 @@ HTTP with static token
 myapp-mcp --transport http --auth-mode token --token my-secret
 ```
 
-HTTP with OAuth:
+HTTP with OAuth (loopback, so no consent PIN is required):
 
 ```shell
 myapp-mcp --transport http --auth-mode oauth --port 8080
 ```
+
+## OAuth
+
+`--auth-mode oauth` runs a built-in OAuth 2.1 authorization server with PKCE
+(`S256` only) and dynamic client registration.
+
+- **Consent PIN.** Set with `--oauth-pin`, `MYAPP_MCP_OAUTH_PIN`,
+  `MYAPP_MCP_OAUTH_PIN_FILE`, or `[mcp] oauth_pin` / `oauth_pin_file`. It is
+  required when binding a non-loopback address, and an empty, whitespace-only,
+  or shorter-than-8-character PIN is refused at startup on any bind. Wrong
+  PINs from every client count together: five within a minute pause approvals
+  for 60 s, doubling with each further miss up to 15 min, with
+  `429 Too Many Requests` and `Retry-After` in the meantime. A correct PIN, or
+  15 quiet minutes, resets the count.
+- **Registration.** Clients are public: no `client_secret` is issued and
+  `token_endpoint_auth_method` is `none`. Each redirect URI must be an
+  absolute URL with no fragment and none of `code`, `state`, `error`,
+  `error_description`, `error_uri` or `iss` in its query, and be `https`,
+  `http` to a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`), or a
+  native-app scheme. `javascript`, `data`, `file`, `vbscript`, `blob` and
+  `about` are always refused. At most 1024 clients are kept; past that,
+  registration gets `429` until a client unused for 24 hours is dropped.
+- **Authorization.** `/oauth/authorize` checks the client and redirect URI
+  first and never redirects on an error; every error is a JSON `400`. The
+  validated request is held on the server under a single-use consent nonce
+  (valid for `oauth_csrf_nonce_ttl_secs`), and the consent page, rendered on
+  the server, posts back only that nonce, the decision and the PIN.
+- **Tokens.** Access tokens last `oauth_token_expiry_secs`. Refresh tokens
+  last 30 days, rotate on use, and are bound to their client: a refresh must
+  send the `client_id` it was issued to, and any other value spends the token.
 
 ## Logging verbosity
 
@@ -148,7 +178,8 @@ column (the offending line is never echoed, since it may hold a secret).
 | `MYAPP_MCP_TOKEN`                   | Static bearer token; empty or whitespace is refused  |
 | `MYAPP_MCP_TOKEN_FILE`              | Path to file containing bearer token                 |
 | `MYAPP_MCP_BASE_URL`                | External base URL for OAuth                          |
-| `MYAPP_MCP_OAUTH_PIN`               | OAuth consent screen PIN                             |
+| `MYAPP_MCP_OAUTH_PIN`               | OAuth consent PIN; 8+ chars, required off loopback   |
+| `MYAPP_MCP_OAUTH_PIN_FILE`          | Path to file containing the OAuth consent PIN        |
 | `MYAPP_MCP_OAUTH_TOKEN_EXPIRY_SECS` | OAuth token lifetime (default: 3600)                 |
 
 See [config.toml.example](../../config.toml.example) for all available fields.

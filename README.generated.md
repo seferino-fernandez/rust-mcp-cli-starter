@@ -122,7 +122,8 @@ LLM clients over two transports:
 - `stdio`: for local clients such as Claude Desktop.
 - `http` (streamable HTTP): for networked clients, with a choice of auth mode:
     - `token`: static bearer token (constant-time compared).
-    - `oauth`: OAuth 2.1 authorization-code flow with PKCE.
+    - `oauth`: OAuth 2.1 authorization-code flow with PKCE, public clients,
+      a server-rendered consent page, and a consent PIN (required off loopback).
     - `none`: no auth (loopback only).
 
 Older clients still negotiate down: the server accepts every protocol version

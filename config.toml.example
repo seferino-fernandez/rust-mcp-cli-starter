@@ -49,7 +49,9 @@ connect_timeout_secs = 10
 # External base URL for OAuth metadata. Env: MYAPP_MCP_BASE_URL
 # base_url = "https://mcp.example.com"
 
-# OAuth consent PIN. Mutually exclusive with oauth_pin_file. Read only by
+# OAuth consent PIN. Required when auth_mode="oauth" binds a non-loopback
+# address; an empty, whitespace-only or shorter-than-8-character PIN is
+# refused at startup. Mutually exclusive with oauth_pin_file. Read only by
 # --transport http. Env: MYAPP_MCP_OAUTH_PIN / _FILE
 # oauth_pin = ""
 # oauth_pin_file = "/run/secrets/myapp-mcp-oauth-pin"
