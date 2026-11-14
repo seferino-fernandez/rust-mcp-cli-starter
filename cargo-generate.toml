@@ -1,5 +1,5 @@
 [template]
-cargo_generate_version = ">=0.23.0"
+cargo_generate_version = ">=0.26.0"
 # Files/dirs not copied into generated projects.
 # `pre-script.rhai` and `cargo-generate.toml` are template machinery, and
 # `.github/workflows/template.yml` is the template repo's own CI (it generates

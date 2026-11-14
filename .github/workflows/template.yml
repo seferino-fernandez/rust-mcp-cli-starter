@@ -36,7 +36,7 @@ jobs:
             - name: Install cargo-generate and cargo nextest
               uses: taiki-e/install-action@v2
               with:
-                  tool: cargo-generate@0.25.0,cargo-nextest
+                  tool: cargo-generate@0.26.0,cargo-nextest
 
             # Generate outside the checkout, otherwise cargo-generate adds the
             # output to the template's own workspace.
