@@ -55,6 +55,7 @@ tower-http = { workspace = true, features = ["cors"] }
 # template:end oauth
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["process", "io-util"] }
 base64.workspace = true
 # template:begin http
 tower.workspace = true

@@ -211,6 +211,23 @@ fn http_tools(config: &ServerConfig, _auth: &HttpAuth) -> anyhow::Result<AppTool
     Ok(tools)
 }
 
+/// Shares the transport policy between the listener and wire-level tests.
+fn streamable_config(
+    config: &McpConfig,
+    cancellation_token: &CancellationToken,
+) -> StreamableHttpServerConfig {
+    StreamableHttpServerConfig::default()
+        // Sessions apply only to protocol versions older than 2026-07-28.
+        // Per SEP-2567 the 2026-07-28 protocol removed them, so modern
+        // clients are served statelessly regardless of this setting; keeping
+        // it on preserves sessions and resumability for older clients.
+        .with_legacy_session_mode(true)
+        .with_cancellation_token(cancellation_token.child_token())
+        // Guards against DNS rebinding. Defaults to loopback only, so a
+        // non-loopback deployment must list its own hostnames here.
+        .with_allowed_hosts(config.allowed_hosts.clone())
+}
+
 /// Serves the MCP server over streamable HTTP on `[mcp] host` and `port`,
 /// with the configured authentication, until SIGINT or SIGTERM.
 ///
@@ -228,16 +245,7 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     let service: StreamableHttpService<AppTools, LocalSessionManager> = StreamableHttpService::new(
         service_factory(tools),
         session_manager,
-        StreamableHttpServerConfig::default()
-            // Sessions apply only to protocol versions older than 2026-07-28.
-            // Per SEP-2567 the 2026-07-28 protocol removed them, so modern
-            // clients are served statelessly regardless of this setting; keeping
-            // it on preserves sessions and resumability for older clients.
-            .with_legacy_session_mode(true)
-            .with_cancellation_token(cancellation_token.child_token())
-            // Guards against DNS rebinding. Defaults to loopback only, so a
-            // non-loopback deployment must list its own hostnames here.
-            .with_allowed_hosts(config.mcp.allowed_hosts.clone()),
+        streamable_config(&config.mcp, &cancellation_token),
     );
 
     tracing::debug!(auth_mode = %config.mcp.auth_mode, "Building router");
@@ -814,6 +822,13 @@ mod wire_tests {
     const V_LEGACY: &str = "2025-11-25";
 
     fn mcp_service() -> StreamableHttpService<AppTools, LocalSessionManager> {
+        mcp_service_with_shutdown(&CancellationToken::new(), Arc::default())
+    }
+
+    fn mcp_service_with_shutdown(
+        shutdown: &CancellationToken,
+        sessions: Arc<LocalSessionManager>,
+    ) -> StreamableHttpService<AppTools, LocalSessionManager> {
         // `ApiClient::new` performs no I/O, and neither `initialize` nor
         // `tools/list` ever calls the upstream API, so these tests need no
         // network and no mock server.
@@ -824,10 +839,8 @@ mod wire_tests {
         let client = myapp_core::ApiClient::new(core_config).expect("client builds");
         StreamableHttpService::new(
             service_factory(AppTools::new(client, 1024 * 1024)),
-            Arc::default(),
-            StreamableHttpServerConfig::default()
-                .with_legacy_session_mode(true)
-                .with_allowed_hosts(McpConfig::default().allowed_hosts),
+            sessions,
+            streamable_config(&McpConfig::default(), shutdown),
         )
     }
 
@@ -988,6 +1001,74 @@ mod wire_tests {
             headers.get("mcp-session-id").is_some(),
             "legacy sessions must still be issued, got {headers:?}"
         );
+    }
+
+    /// Shutdown must reach legacy workers even while their SSE stream is open.
+    #[tokio::test]
+    async fn shutdown_closes_active_legacy_session_stream_and_worker() {
+        use rmcp::transport::streamable_http_server::session::local::SessionError;
+        use std::{future::Future, task::Poll, time::Duration};
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let shutdown = CancellationToken::new();
+            let sessions = Arc::new(LocalSessionManager::default());
+            let service = mcp_service_with_shutdown(&shutdown, sessions.clone());
+            let (status, headers, _) = post(&service, initialize(V_LEGACY), None, None).await;
+            assert!(status.is_success());
+            let session = headers.get("mcp-session-id").unwrap().to_str().unwrap();
+            let (_, _, _) = post(
+                &service,
+                json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+                Some(session),
+                None,
+            )
+            .await;
+            let (status, _, payloads) =
+                post(&service, legacy_tools_list(), Some(session), None).await;
+            assert!(status.is_success());
+            assert_eq!(result_of(&payloads)["tools"].as_array().unwrap().len(), 5);
+
+            // Keep the service and session handle alive: dropping either must
+            // not accidentally be what ends the stream under test.
+            let handle = sessions
+                .sessions
+                .read()
+                .await
+                .values()
+                .next()
+                .unwrap()
+                .clone();
+            let request = axum::http::Request::builder()
+                .method("GET")
+                .uri("/")
+                .header("host", "localhost")
+                .header("accept", "text/event-stream")
+                .header("mcp-session-id", session)
+                .header("mcp-protocol-version", V_LEGACY)
+                .body(Body::empty())
+                .unwrap();
+            let response = service.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let mut stream = Box::pin(axum::body::to_bytes(Body::new(response.into_body()), 4096));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(stream.as_mut().poll(cx).is_pending())).await,
+                "the session stream must be open before shutdown"
+            );
+
+            shutdown.cancel();
+            stream.await.expect("shutdown closes the SSE body cleanly");
+            // The HTTP body and worker observe cancellation independently.
+            // Wait for worker termination too, within the same deadline.
+            loop {
+                match handle.establish_common_channel().await {
+                    Err(SessionError::SessionServiceTerminated) => break,
+                    Ok(_) => tokio::task::yield_now().await,
+                    Err(error) => panic!("unexpected session error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("session shutdown must not wait for the keep-alive timeout");
     }
 
     /// A modern peer gets the SEP-2322 `resultType` discriminator and the

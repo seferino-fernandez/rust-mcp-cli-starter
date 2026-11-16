@@ -247,6 +247,62 @@ mod router_tests {
     }
 
     #[test]
+    fn list_output_schema_matches_present_and_omitted_pagination() {
+        use crate::tools::types::Items;
+        use myapp_core::{Redacted, models::Item, pagination::Page};
+        use serde_json::json;
+
+        let tool = listed_tools()
+            .into_iter()
+            .find(|tool| tool.name == "myapp_list_items")
+            .unwrap();
+        let schema = tool.output_schema.unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 2);
+        assert!(required.contains(&json!("items")));
+        assert!(required.contains(&json!("count")));
+        assert_eq!(schema["additionalProperties"], false);
+
+        let unpaginated = Items::<Item>::new(vec![]);
+        let paginated = Items::from(Page::<Item> {
+            records: vec![],
+            page: 1,
+            page_size: 10,
+            total_records: 0,
+        });
+        let omitted = serde_json::to_value(Redacted::new(&unpaginated).unwrap()).unwrap();
+        let populated = serde_json::to_value(Redacted::new(&paginated).unwrap()).unwrap();
+        for field in ["page", "page_size", "total_records"] {
+            assert!(
+                !required.contains(&json!(field)),
+                "{field} must be optional"
+            );
+            assert!(omitted.get(field).is_none(), "{omitted}");
+            assert!(populated[field].is_u64(), "{populated}");
+            let types = &properties[field]["type"];
+            assert!(
+                types == "integer"
+                    || types
+                        .as_array()
+                        .is_some_and(|types| types.contains(&json!("integer"))),
+                "{field} must admit serialized integers: {types}"
+            );
+        }
+        for output in [&omitted, &populated] {
+            let object = output.as_object().unwrap();
+            assert!(object.keys().all(|key| properties.contains_key(key)));
+            assert!(
+                required
+                    .iter()
+                    .all(|key| object.contains_key(key.as_str().unwrap()))
+            );
+            assert!(object["items"].is_array());
+            assert!(object["count"].is_u64());
+        }
+    }
+
+    #[test]
     fn tool_annotations_are_complete() {
         let tools = listed_tools();
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
