@@ -1,12 +1,14 @@
 //! The one test harness for calling MCP tools.
 //!
 //! Every tool test calls through [`ServerHandler::call_tool`], the path a real
-//! request takes, so OAuth scopes, argument checks, destructive-tool
+//! request takes, so argument checks, destructive-tool
 //! confirmation and the response budget apply exactly as they do in
 //! production.
 
 use super::handler::AppTools;
+// template:begin oauth
 use crate::auth::Scopes;
+// template:end oauth
 use myapp_core::{ApiClient, Config, SecretString};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities, JsonObject,
@@ -26,13 +28,17 @@ pub(crate) const TEST_API_KEY: &str = "test-key";
 /// How a request was authenticated, as the tool handler sees it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Caller {
-    /// The stdio transport: the context carries no HTTP request parts.
+    /// A local client using standard input and output.
     Stdio,
+    // template:begin http
     /// The static-token and `none` HTTP modes: request parts without scopes.
-    NoOAuthToken,
+    UnrestrictedHttp,
+    // template:end http
+    // template:begin oauth
     /// An OAuth access token granted these scopes. Names that are not a
     /// recognised scope are dropped, as the OAuth middleware drops them.
     OAuth(&'static [&'static str]),
+    // template:end oauth
 }
 
 /// Tools talking to the upstream mocked by `server`, with API key
@@ -60,28 +66,42 @@ pub(crate) fn tools_at(base_url: String, max_response_bytes: usize) -> AppTools 
     AppTools::new(client, max_response_bytes)
 }
 
-/// A request context as the transport and, for `caller`, the OAuth middleware
-/// build it. It carries no protocol version, so confirmation is skipped
-/// unless [`confirmable`] marks it.
-///
-/// The connection serving the context's peer closes on return; no tool talks
-/// back to the client through it.
-pub(crate) fn context(tools: &AppTools, caller: Caller) -> RequestContext<RoleServer> {
+/// A request context for the selected caller. Confirmation is skipped unless
+/// [`confirmable`] marks it. The connection serving the peer closes on return.
+pub(crate) fn context(tools: &AppTools, _caller: Caller) -> RequestContext<RoleServer> {
     let (server_transport, _client_transport) = tokio::io::duplex(4096);
     let running = serve_directly::<RoleServer, _, _, _, _>(tools.clone(), server_transport, None);
+    let extensions = rmcp::model::Extensions::default();
+    // template:begin http
+    let extensions = with_request_parts(extensions, _caller);
+    // template:end http
     let mut context = RequestContext::new(NumberOrString::Number(1), running.peer().clone());
-    let scopes = match caller {
-        Caller::Stdio => return context,
-        Caller::NoOAuthToken => None,
-        Caller::OAuth(scopes) => Some(scopes),
-    };
-    let (mut parts, ()) = axum::http::Request::new(()).into_parts();
-    if let Some(scopes) = scopes {
-        parts.extensions.insert(Scopes::parse(scopes));
-    }
-    context.extensions.insert(parts);
+    context.extensions = extensions;
     context
 }
+
+// template:begin http
+fn with_request_parts(
+    mut extensions: rmcp::model::Extensions,
+    caller: Caller,
+) -> rmcp::model::Extensions {
+    if matches!(caller, Caller::Stdio) {
+        return extensions;
+    }
+    let (parts, ()) = axum::http::Request::new(()).into_parts();
+    // template:begin oauth
+    let parts = {
+        let mut parts = parts;
+        if let Caller::OAuth(scopes) = caller {
+            parts.extensions.insert(Scopes::parse(scopes));
+        }
+        parts
+    };
+    // template:end oauth
+    extensions.insert(parts);
+    extensions
+}
+// template:end http
 
 /// Marks `context` as coming from a client that can answer a confirmation:
 /// protocol 2026-07-28 with form elicitation.
@@ -163,8 +183,11 @@ pub(crate) async fn assert_no_requests(server: &MockServer) {
 }
 
 mod tests {
-    use super::{Caller, call, call_tool, first_text, tools_for, tools_with_budget};
+    use super::{call_tool, first_text, tools_with_budget};
+    // template:begin oauth
+    use super::{Caller, call, tools_for};
     use rmcp::model::CallToolResponse;
+    // template:end oauth
     use serde_json::{Value, json};
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -196,6 +219,7 @@ mod tests {
         assert_eq!(body["limit"], 300, "{body}");
     }
 
+    // template:begin oauth
     #[tokio::test]
     async fn harness_call_enforces_scopes() {
         let server = MockServer::start().await;
@@ -220,4 +244,5 @@ mod tests {
         );
         super::assert_no_requests(&server).await;
     }
+    // template:end oauth
 }

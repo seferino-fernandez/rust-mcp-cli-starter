@@ -10,6 +10,7 @@ specification, and negotiates down to every earlier version `rmcp` supports.
 ## Transports
 
 - `stdio` for Claude Desktop, Claude Code, and other local MCP clients
+<!-- template:begin http -->
 - `http` (streamable HTTP) for remote deployments
 
 ### Sessions and the 2026-07-28 boundary
@@ -44,12 +45,14 @@ rejects mismatches.
 
 ## Authentication modes
 
-| Mode    | Flag                | Description                                         |
-| ------- | ------------------- | --------------------------------------------------- |
-| `token` | `--auth-mode token` | Static bearer token (default)                       |
-| `oauth` | `--auth-mode oauth` | OAuth 2.1 with PKCE and dynamic client registration |
-| `none`  | `--auth-mode none`  | No auth (loopback-only, local development)          |
+- `--auth-mode token`: static bearer token (default).
+- `--auth-mode none`: no authentication (loopback-only, local development).
 
+<!-- template:begin oauth -->
+- `--auth-mode oauth`: OAuth 2.1 with PKCE and dynamic client registration.
+
+<!-- template:end oauth -->
+<!-- template:end http -->
 ## Quick start
 
 stdio transport:
@@ -58,12 +61,15 @@ stdio transport:
 myapp-mcp --transport stdio
 ```
 
+<!-- template:begin http -->
 HTTP with static token
 
 ```shell
 myapp-mcp --transport http --auth-mode token --token my-secret
 ```
 
+<!-- template:end http -->
+<!-- template:begin oauth -->
 HTTP with OAuth (loopback, so no consent PIN is required):
 
 ```shell
@@ -132,6 +138,7 @@ myapp-mcp --transport http --auth-mode oauth --port 8080
   last 30 days, rotate on use, and are bound to their client: a refresh must
   send the `client_id` it was issued to, and any other value spends the token.
 
+<!-- template:end oauth -->
 ## Logging verbosity
 
 `-v`/`--verbose` and `-q`/`--quiet` adjust the log level (`-q` silent; `-v` warn,
@@ -146,21 +153,21 @@ configured level prints a warning and falls back to `info`.
 ## Example tools
 
 Every tool name carries the `myapp_` prefix, so a client running several MCP
-servers can tell this one's tools apart. The scope column is the OAuth scope a
-token needs to call the tool.
+servers can tell this one's tools apart.
 
-| Tool                      | Description                                  | Scope   |
-| ------------------------- | -------------------------------------------- | ------- |
-| `myapp_get_system_status` | Server health/status                         | `read`  |
-| `myapp_list_items`        | List items (paginated: `page`, `page_size`)  | `read`  |
-| `myapp_get_item`          | Fetch one item by `id`                       | `read`  |
-| `myapp_create_item`       | Create an item (`name`, `enabled`)           | `write` |
-| `myapp_delete_item`       | Delete an item by `id` (destructive)         | `write` |
+| Tool                      | Description                                  | Read-only |
+| ------------------------- | -------------------------------------------- | --------- |
+| `myapp_get_system_status` | Server health/status                         | Yes |
+| `myapp_list_items`        | List items (paginated: `page`, `page_size`)  | Yes |
+| `myapp_get_item`          | Fetch one item by `id`                       | Yes |
+| `myapp_create_item`       | Create an item (`name`, `enabled`)           | No |
+| `myapp_delete_item`       | Delete an item by `id` (destructive)         | No |
 
 ### Tool calls
 
 Every call goes through the same checks, in order:
 
+<!-- template:begin oauth -->
 1. **OAuth scope.** A token without the `write` scope may call only tools
    annotated `readOnlyHint: true`; any other tool, including one with no
    hint, answers an `insufficient_scope` tool error before anything else
@@ -169,10 +176,11 @@ Every call goes through the same checks, in order:
    scopes and may call every tool. In OAuth mode a request that somehow
    reaches a tool without scopes fails closed: it may call only read-only
    tools.
-2. **Arguments.** An argument the tool's input schema does not declare is
+<!-- template:end oauth -->
+1. **Arguments.** An argument the tool's input schema does not declare is
    refused, without contacting the upstream API. Every params struct also
    denies unknown fields.
-3. **Confirmation.** A tool annotated `destructiveHint: true`, called by a
+1. **Confirmation.** A tool annotated `destructiveHint: true`, called by a
    client that negotiated 2026-07-28 and supports form elicitation, first
    answers an input-required result asking the user to confirm. Its
    arguments are decoded first, so a mistyped one fails before the user is
@@ -185,8 +193,8 @@ Every call goes through the same checks, in order:
    a spent state could be replayed, but only within its 5 minutes. Clients without form elicitation, or on an older protocol, run the
    tool directly. Turn the prompt off with `[mcp] confirm_destructive = false`
    or `MYAPP_MCP_CONFIRM_DESTRUCTIVE=false`. This is a courtesy against a
-   model acting alone, not access control: the `write` scope is.
-4. **Response budget.** The whole serialized result, `content` and
+   model acting alone, not access control.
+1. **Response budget.** The whole serialized result, `content` and
    `structuredContent` together, is capped at `max_response_bytes` (default
    1 MiB). A larger result is replaced by a small `response_too_large` error;
    if even that cannot fit, the call fails with a protocol error.
@@ -243,26 +251,39 @@ absent.
 
 Each setting comes from the highest layer that sets it: CLI flag, then
 `MYAPP_*` env, then `MYAPP_*_FILE` env, then `config.toml`. A secret's lower
-layers are never read, so a `MYAPP_MCP_TOKEN_FILE` behind `--token` is never
-opened. The `token` and `oauth_pin` are HTTP-only: `--transport stdio` never
-resolves them. A value that does not parse fails at startup naming its
+layers are never read. A value that does not parse fails at startup naming its
 source: an env var by name and raw value, a TOML key by file, line and
 column (the offending line is never echoed, since it may hold a secret).
 
-| Variable                            | Description                                          |
-| ----------------------------------- | ---------------------------------------------------- |
+| Variable | Description |
+| --- | --- |
 | `MYAPP_BASE_URL`                    | Upstream API base URL                                |
 | `MYAPP_API_KEY`                     | API key sent as `X-Api-Key`                          |
+| `MYAPP_MCP_CONFIRM_DESTRUCTIVE`     | Confirm destructive tools (default: `true`)          |
+| `MYAPP_MCP_MAX_RESPONSE_BYTES`      | Tool result size cap in bytes (default: 1 MiB)       |
+
+<!-- template:begin http -->
+### HTTP endpoint settings
+
+| Variable | Description |
+| --- | --- |
 | `MYAPP_MCP_HOST`                    | Bind IP literal (`127.0.0.1`, `::1`, `[::1]`)        |
 | `MYAPP_MCP_PORT`                    | Bind port                                            |
-| `MYAPP_MCP_AUTH_MODE`               | Authentication mode: `token`, `oauth` or `none`      |
+| `MYAPP_MCP_AUTH_MODE`               | Endpoint authentication mode      |
 | `MYAPP_MCP_TOKEN`                   | Static bearer token; empty or whitespace is refused  |
 | `MYAPP_MCP_TOKEN_FILE`              | Path to file containing bearer token                 |
+
+<!-- template:end http -->
+<!-- template:begin oauth -->
+### OAuth settings
+
+| Variable | Description |
+| --- | --- |
 | `MYAPP_MCP_BASE_URL`                | External base URL for OAuth                          |
 | `MYAPP_MCP_OAUTH_PIN`               | OAuth consent PIN; 8+ chars, required off loopback   |
 | `MYAPP_MCP_OAUTH_PIN_FILE`          | Path to file containing the OAuth consent PIN        |
 | `MYAPP_MCP_OAUTH_TOKEN_EXPIRY_SECS` | OAuth token lifetime (default: 3600)                 |
-| `MYAPP_MCP_CONFIRM_DESTRUCTIVE`     | Confirm destructive tools (default: `true`)          |
-| `MYAPP_MCP_MAX_RESPONSE_BYTES`      | Tool result size cap in bytes (default: 1 MiB)       |
+
+<!-- template:end oauth -->
 
 See [config.toml.example](../../config.toml.example) for all available fields.

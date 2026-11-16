@@ -31,17 +31,33 @@ cargo generate --git https://github.com/seferino-fernandez/rust-mcp-cli-starter 
 
 This renames everything (`myapp` → `acme-tools`, `MYAPP_` → `ACME_TOOLS_`).
 
+Choose MCP support when prompted:
+
+| `mcp_transport` | Generated MCP server |
+| --- | --- |
+| `stdio` (default) | Local stdio transport only |
+| `http` | Stdio and HTTP, with static-token or loopback-only unauthenticated access |
+| `http-oauth` | Stdio and HTTP, including the built-in OAuth server |
+
+Pass `--define mcp_transport=http` or `--define mcp_transport=http-oauth` to
+select an HTTP variant non-interactively. Unselected source, dependencies,
+configuration, and documentation are omitted. Stdio projects also omit the
+HTTP container setup and Inspector recipes. The template checkout itself
+retains the complete implementation.
+
+
 cargo-generate also prompts for `github_org`, the GitHub user or organization
 that will host the repository (default `your-org`). It fills in the
 `repository`/`homepage` URLs in `Cargo.toml` and the image path in
-`deploy/compose.yaml`. Pass it up front with `--define github_org=acme-corp`.
+`deploy/compose.yaml` when HTTP is selected. Pass it up front with `--define github_org=acme-corp`.
 
 The generated project gets its own `README.md` (from
 [`README.generated.md`](README.generated.md)) and an MIT `LICENSE.md` naming
 you (from your git `user.name`) with the current year.
 
-`--allow-commands` is required because the generation hook runs `sed`/`cargo fmt`
-to rename the project; without it, cargo-generate prompts for confirmation
+`--allow-commands` is required because the generation hook selects capability
+regions with `awk`, renames the project with `sed`, formats it with `cargo fmt`,
+and prunes the lockfile with `cargo update --workspace`; without it, cargo-generate prompts for confirmation
 (interactive) or fails (with `--silent`).
 
 ## Quick start (after generating)

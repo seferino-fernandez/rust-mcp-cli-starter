@@ -17,7 +17,10 @@ use serde_json::{Map, Value};
 
 use super::handler::AppTools;
 use super::schema::{close_object_map, enforce_response_budget};
-use super::{confirm, params, scope};
+use super::{confirm, params};
+// template:begin oauth
+use super::scope;
+// template:end oauth
 
 /// Hardens a tool's advertised schemas in place: closes the input schema and,
 /// when present, the output schema (sets `additionalProperties: false` and an
@@ -92,8 +95,7 @@ impl ServerHandler for AppTools {
         info
     }
 
-    /// Advertises every tool to every caller. OAuth scopes restrict calls,
-    /// not the list, so a `read` token sees the same tools as a `write` one.
+    /// Advertises every tool to every caller.
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -104,8 +106,8 @@ impl ServerHandler for AppTools {
             .with_cache_scope(CacheScope::Private))
     }
 
-    /// Runs a tool call through, in order: the OAuth scope check, the
-    /// argument check, destructive-tool confirmation (after decoding the
+    /// Runs a tool call through permission and argument checks, then
+    /// destructive-tool confirmation (after decoding the
     /// params, so a mistyped argument fails before the user is asked), the
     /// tool itself and the response budget. An unknown tool name skips the
     /// checks and gets the router's own error.
@@ -116,10 +118,12 @@ impl ServerHandler for AppTools {
     ) -> Result<CallToolResponse, McpError> {
         tracing::info!(tool = %request.name, "call_tool");
         if let Some(tool) = self.router.get(&request.name) {
+            // template:begin oauth
             if !scope::permits(&context, tool, self.require_scopes) {
                 tracing::warn!(tool = %request.name, "call_tool: token lacks the write scope");
                 return Ok(scope::insufficient_scope(&request.name).into());
             }
+            // template:end oauth
             if let Some(rejection) = undeclared_argument_rejection(tool, &request) {
                 return Ok(rejection.into());
             }
@@ -183,10 +187,12 @@ mod tests {
     use wiremock::matchers::{any, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    // template:begin oauth
     const READ: &[&str] = &["read"];
     const WRITE: &[&str] = &["write"];
     const READ_WRITE: &[&str] = &["read", "write"];
 
+    // template:end oauth
     /// A valid call for every tool, so a check that wrongly refuses a valid
     /// call cannot pass for one that refuses an invalid one.
     const VALID_CALLS: [(&str, &str); 5] = [
@@ -281,6 +287,7 @@ mod tests {
             == Some(true)
     }
 
+    // template:begin oauth
     fn assert_refused(result: &CallToolResult, name: &str) {
         assert_eq!(result.is_error, Some(true), "{result:?}");
         assert_eq!(
@@ -288,13 +295,16 @@ mod tests {
             format!("insufficient_scope: tool '{name}' requires the 'write' scope"),
         );
     }
+    // template:end oauth
 
     fn assert_succeeded(result: &CallToolResult, label: &str) {
         assert_ne!(result.is_error, Some(true), "{label}: {result:?}");
+        // template:begin oauth
         assert!(
             !first_text(result).starts_with("insufficient_scope"),
             "{label}"
         );
+        // template:end oauth
     }
 
     /// `name` called with `arguments` through `context`.
@@ -410,8 +420,7 @@ mod tests {
         assert_no_requests(&server).await;
     }
 
-    // ---- OAuth scopes ----
-
+    // template:begin oauth
     #[tokio::test]
     async fn read_scope_refuses_create_and_delete_without_contacting_the_upstream() {
         let server = untouched_upstream().await;
@@ -427,7 +436,6 @@ mod tests {
         }
         assert_no_requests(&server).await;
     }
-
     /// The scope check runs first: before the argument check, so a refused
     /// call learns nothing about the tool's parameters, and before
     /// confirmation, so a read token is never asked to confirm.
@@ -459,7 +467,6 @@ mod tests {
         assert_refused(&confirmable_read, "myapp_delete_item");
         assert_no_requests(&server).await;
     }
-
     #[tokio::test]
     async fn read_scope_is_allowed_every_read_only_tool() {
         let server = upstream().await;
@@ -481,14 +488,19 @@ mod tests {
         assert_eq!(reads, 3);
         assert_eq!(request_count(&server).await, 3);
     }
+    // template:end oauth
 
     #[tokio::test]
-    async fn write_scope_and_callers_without_an_oauth_token_reach_every_tool() {
+    async fn permitted_callers_reach_every_tool() {
         for caller in [
+            Caller::Stdio,
+            // template:begin oauth
             Caller::OAuth(WRITE),
             Caller::OAuth(READ_WRITE),
-            Caller::NoOAuthToken,
-            Caller::Stdio,
+            // template:end oauth
+            // template:begin http
+            Caller::UnrestrictedHttp,
+            // template:end http
         ] {
             let server = upstream().await;
             let tools = tools_for(&server);
@@ -504,8 +516,7 @@ mod tests {
         }
     }
 
-    /// `tools/list` is the same for every caller: scopes restrict calls, not
-    /// what the server advertises.
+    /// `tools/list` advertises the same tools to every caller.
     #[tokio::test]
     async fn tools_list_is_identical_for_every_caller() {
         let server = untouched_upstream().await;
@@ -515,16 +526,22 @@ mod tests {
         assert!(every_tool.iter().any(|tool| !is_read_only(tool)));
 
         for caller in [
+            Caller::Stdio,
+            // template:begin oauth
             Caller::OAuth(READ),
             Caller::OAuth(WRITE),
             Caller::OAuth(READ_WRITE),
             Caller::OAuth(&[]),
-            Caller::NoOAuthToken,
+            // template:end oauth
+            // template:begin http
+            Caller::UnrestrictedHttp,
+            // template:end http
         ] {
             assert_eq!(listed_tools(&tools, caller).await, every_tool, "{caller:?}");
         }
     }
 
+    // template:begin oauth
     /// Under OAuth the handler requires scopes, so a request that reaches it
     /// without them, with or without HTTP request parts, fails closed to the
     /// read-only tools. Without the requirement, the same requests reach
@@ -534,7 +551,7 @@ mod tests {
         let server = upstream().await;
         let oauth = tools_for(&server).with_require_scopes(true);
 
-        for caller in [Caller::NoOAuthToken, Caller::Stdio] {
+        for caller in [Caller::UnrestrictedHttp, Caller::Stdio] {
             for tool in oauth.router().list_all() {
                 let name = tool.name.as_ref();
                 let result = complete(call(&oauth, caller, name, valid_arguments(name)).await);
@@ -552,7 +569,7 @@ mod tests {
             let result = complete(
                 call(
                     &unrestricted,
-                    Caller::NoOAuthToken,
+                    Caller::UnrestrictedHttp,
                     name,
                     valid_arguments(name),
                 )
@@ -562,7 +579,6 @@ mod tests {
         }
         assert_eq!(request_count(&server).await, 2 * 3 + 2);
     }
-
     #[tokio::test]
     async fn read_scope_leaves_the_unknown_tool_error_unchanged() {
         let server = untouched_upstream().await;
@@ -574,6 +590,7 @@ mod tests {
 
         assert_eq!(error.message, "tool not found");
     }
+    // template:end oauth
 
     // ---- Destructive-tool confirmation ----
 
@@ -956,7 +973,7 @@ mod tests {
         let tools = tools_at(Config::default().base_url, 1024);
         let mut rows = 0;
         for line in section.lines() {
-            // Data rows only: | `name` | description | scope |
+            // Data rows only: | `name` | description | read-only |
             let Some(row) = line.strip_prefix("| `") else {
                 continue;
             };
@@ -966,19 +983,15 @@ mod tests {
                 .router()
                 .get(name)
                 .unwrap_or_else(|| panic!("README row names unregistered tool {name}"));
-            let scope = line
+            let read_only = line
                 .trim_end()
                 .trim_end_matches('|')
                 .rsplit('|')
                 .next()
                 .unwrap_or_default()
                 .trim();
-            let expected = if is_read_only(tool) {
-                "`read`"
-            } else {
-                "`write`"
-            };
-            assert_eq!(scope, expected, "README scope cell for {name}");
+            let expected = if is_read_only(tool) { "Yes" } else { "No" };
+            assert_eq!(read_only, expected, "README read-only cell for {name}");
         }
         assert_eq!(rows, VALID_CALLS.len(), "one README row per tool");
     }

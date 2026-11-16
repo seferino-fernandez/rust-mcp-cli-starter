@@ -37,6 +37,7 @@ fn default_page_size() -> u32 {
 #[serde(deny_unknown_fields)]
 pub struct ItemIdParams {
     /// Item id.
+    // template:begin http
     ///
     /// The `x-mcp-header` annotation (SEP-2243) asks clients negotiating
     /// 2026-07-28 to also send this value as the `Mcp-Param-Item-Id` HTTP
@@ -46,6 +47,7 @@ pub struct ItemIdParams {
     ///
     /// Promotion is limited to top-level, primitive-typed properties.
     #[schemars(extend("x-mcp-header" = "Item-Id"))]
+    // template:end http
     pub id: i64,
 }
 

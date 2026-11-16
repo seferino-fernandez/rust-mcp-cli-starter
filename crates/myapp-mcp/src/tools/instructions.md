@@ -11,10 +11,12 @@ This server exposes the MYAPP API as tools.
 Every tool rejects an argument it does not declare, so send only the listed
 arguments.
 
+<!-- template:begin oauth -->
 Tools are described by the standard tool annotations. An OAuth access token
 without the `write` scope may call only tools annotated read-only; any other
 tool answers `insufficient_scope`.
 
+<!-- template:end oauth -->
 Destructive tools may ask for confirmation through MCP form elicitation. Retry
 the call with the same arguments, the returned request state and the user's
 answer. This confirmation is a best-effort courtesy, not access control.

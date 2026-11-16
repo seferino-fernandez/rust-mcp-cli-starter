@@ -1,26 +1,34 @@
 //! Streamable HTTP transport: resolves the configured authentication mode,
-//! builds the `/mcp` service and, under OAuth, the authorization-server
-//! routes, then serves them until SIGINT or SIGTERM.
+//! builds the `/mcp` service and serves it until SIGINT or SIGTERM.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+// template:begin oauth
 use std::time::Duration;
+// template:end oauth
 
 use crate::auth::AuthMode;
 use crate::config::{McpConfig, ServerConfig};
+// template:begin oauth
 use crate::middleware::cors::oauth_cors_layer;
 use crate::middleware::oauth::{OAuthMiddlewareState, oauth_bearer_auth};
+// template:end oauth
 use crate::middleware::static_bearer_auth::{StaticAuthToken, static_bearer_auth};
+// template:begin oauth
 use crate::oauth;
 use crate::oauth::model::OAuthEndpointState;
 use crate::oauth::store::{OAuthStore, OAuthStoreConfig};
+// template:end oauth
 use crate::secret_digest::SecretDigest;
-use crate::shared::{create_api_client, resolve_base_url};
+use crate::shared::create_api_client;
+// template:begin oauth
+use crate::shared::resolve_base_url;
+// template:end oauth
 use crate::tools::AppTools;
-use axum::{
-    middleware::{self},
-    routing::{get, post},
-};
+use axum::middleware;
+// template:begin oauth
+use axum::routing::{get, post};
+// template:end oauth
 use myapp_core::SecretString;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
@@ -29,6 +37,7 @@ use rmcp::transport::streamable_http_server::{
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+// template:begin oauth
 /// Every way to set the OAuth consent PIN, named by every PIN refusal.
 const OAUTH_PIN_SETTINGS: &str = "pass --oauth-pin <value>, set MYAPP_MCP_OAUTH_PIN or \
                                   MYAPP_MCP_OAUTH_PIN_FILE, or add [mcp] oauth_pin = \"...\" or \
@@ -37,18 +46,22 @@ const OAUTH_PIN_SETTINGS: &str = "pass --oauth-pin <value>, set MYAPP_MCP_OAUTH_
 /// The fewest Unicode characters a configured consent PIN may have.
 const MIN_OAUTH_PIN_CHARS: usize = 8;
 
+// template:end oauth
 /// The HTTP transport's authentication, resolved from config with the data
 /// each mode needs.
 #[derive(Debug)]
 enum HttpAuth {
     /// A static bearer token, known to be non-blank.
     Token(SecretString),
+    // template:begin oauth
     /// OAuth 2.1 with PKCE.
     OAuth(OAuthSettings),
+    // template:end oauth
     /// No authentication; loopback only.
     None,
 }
 
+// template:begin oauth
 /// What the OAuth routes need beyond the store, resolved once at startup.
 #[derive(Debug)]
 struct OAuthSettings {
@@ -58,12 +71,14 @@ struct OAuthSettings {
     pin: Option<SecretString>,
 }
 
+// template:end oauth
 impl HttpAuth {
     /// Resolves the configured auth mode for the bind address, failing fast
     /// with an actionable message when it is unsafe.
     ///
     /// - `token`: a non-empty, non-whitespace token must be present.
     /// - `none`: only allowed on a loopback address.
+    // template:begin oauth
     /// - `oauth`: refuses a wildcard CORS origin (any site could drive the
     ///   flow), refuses plain HTTP on a non-loopback address (tokens/PKCE
     ///   would traverse the network unencrypted) unless
@@ -71,6 +86,7 @@ impl HttpAuth {
     ///   without a consent PIN (any caller could approve itself), and refuses
     ///   an empty or whitespace-only PIN, or one shorter than
     ///   [`MIN_OAUTH_PIN_CHARS`] characters, on any bind.
+    // template:end oauth
     fn resolve(config: &ServerConfig, addr: &SocketAddr) -> anyhow::Result<Self> {
         match config.mcp.auth_mode {
             AuthMode::Token => {
@@ -88,15 +104,7 @@ impl HttpAuth {
                 };
                 Ok(Self::Token(token))
             }
-            AuthMode::None => {
-                if !addr.ip().is_loopback() {
-                    anyhow::bail!(
-                        "auth_mode=\"none\" is only allowed on loopback addresses. \
-                         Current bind address: {addr}"
-                    );
-                }
-                Ok(Self::None)
-            }
+            // template:begin oauth
             AuthMode::OAuth => {
                 if config
                     .mcp
@@ -145,6 +153,16 @@ impl HttpAuth {
                 }
                 Ok(Self::OAuth(OAuthSettings { base_url, pin }))
             }
+            // template:end oauth
+            AuthMode::None => {
+                if !addr.ip().is_loopback() {
+                    anyhow::bail!(
+                        "auth_mode=\"none\" is only allowed on loopback addresses. \
+                         Current bind address: {addr}"
+                    );
+                }
+                Ok(Self::None)
+            }
         }
     }
 }
@@ -183,24 +201,21 @@ fn service_factory(
     move || Ok(tools.clone())
 }
 
-/// Builds the one tool handler the HTTP transport serves. Under OAuth it
-/// requires scopes on every call, so a request that reaches a tool without
-/// them is limited to read-only tools; the `token` and `none` modes grant no
-/// scopes and leave every tool callable.
-fn http_tools(config: &ServerConfig, auth: &HttpAuth) -> anyhow::Result<AppTools> {
-    Ok(
-        AppTools::new(create_api_client(config)?, config.mcp.max_response_bytes)
-            .with_confirm_destructive(config.mcp.confirm_destructive)
-            .with_require_scopes(matches!(auth, HttpAuth::OAuth(_))),
-    )
+/// Builds the shared tool handler for the HTTP transport.
+fn http_tools(config: &ServerConfig, _auth: &HttpAuth) -> anyhow::Result<AppTools> {
+    let tools = AppTools::new(create_api_client(config)?, config.mcp.max_response_bytes)
+        .with_confirm_destructive(config.mcp.confirm_destructive);
+    // template:begin oauth
+    let tools = tools.with_require_scopes(matches!(_auth, HttpAuth::OAuth(_)));
+    // template:end oauth
+    Ok(tools)
 }
 
 /// Serves the MCP server over streamable HTTP on `[mcp] host` and `port`,
 /// with the configured authentication, until SIGINT or SIGTERM.
 ///
 /// Fails when the bind address is invalid, the authentication settings are
-/// refused (a blank token, `none` off loopback, or an unsafe OAuth setup or
-/// consent PIN), the API client cannot be built, or the listener cannot
+/// refused, the API client cannot be built, or the listener cannot
 /// bind.
 pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     let addr = listen_addr(&config.mcp.host, config.mcp.port)?;
@@ -236,6 +251,7 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
                     static_bearer_auth,
                 ))
         }
+        // template:begin oauth
         HttpAuth::OAuth(OAuthSettings { base_url, pin }) => {
             tracing::info!("Using OAuth 2.1 authentication with PKCE");
             let store_config = OAuthStoreConfig::from_mcp_config(&config.mcp);
@@ -306,6 +322,7 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
 
             oauth_routes.merge(mcp_routes)
         }
+        // template:end oauth
         HttpAuth::None => {
             tracing::warn!("Running with auth_mode=none: no authentication on MCP endpoints");
             axum::Router::new().nest_service("/mcp", service)
@@ -348,7 +365,7 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
 }
 
 /// Waits for SIGINT (Ctrl+C) or SIGTERM (Unix), then cancels `cancellation_token`
-/// so background tasks (e.g. the OAuth store sweep) exit alongside the HTTP server.
+/// so background tasks exit alongside the HTTP server.
 ///
 /// SIGTERM handling matters for container orchestrators (Docker, Kubernetes) that
 /// request graceful shutdown via SIGTERM before escalating to SIGKILL.
@@ -387,10 +404,10 @@ async fn shutdown_signal(cancellation_token: CancellationToken) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // template:begin oauth
     use crate::config::OAuthCorsConfig;
     use axum::body::Body;
     use tower::ServiceExt;
-
     /// Build a minimal router with the CORS layer applied and send a preflight request.
     /// Returns the `access-control-allow-origin` header value if present.
     async fn preflight_origin(
@@ -416,7 +433,6 @@ mod tests {
             .get("access-control-allow-origin")
             .map(|header_val| header_val.to_str().unwrap().to_string())
     }
-
     #[tokio::test]
     async fn cors_allows_configured_origin() {
         let cors_config = OAuthCorsConfig {
@@ -425,7 +441,6 @@ mod tests {
         let allowed = preflight_origin(&cors_config, "http://localhost").await;
         assert_eq!(allowed.as_deref(), Some("http://localhost"));
     }
-
     #[tokio::test]
     async fn cors_rejects_unconfigured_origin() {
         let cors_config = OAuthCorsConfig {
@@ -437,7 +452,6 @@ mod tests {
             "unconfigured origin should not receive CORS header, got: {allowed:?}"
         );
     }
-
     #[tokio::test]
     async fn cors_wildcard_allows_any_origin() {
         let cors_config = OAuthCorsConfig {
@@ -446,7 +460,6 @@ mod tests {
         let allowed = preflight_origin(&cors_config, "http://anything.example.com").await;
         assert_eq!(allowed.as_deref(), Some("*"));
     }
-
     #[tokio::test]
     async fn cors_multiple_origins_allowed() {
         let cors_config = OAuthCorsConfig {
@@ -461,14 +474,15 @@ mod tests {
         let second = preflight_origin(&cors_config, "https://app.example.com").await;
         assert_eq!(second.as_deref(), Some("https://app.example.com"));
     }
-
     #[tokio::test]
     async fn cors_default_config_allows_localhost() {
         let cors_config = OAuthCorsConfig::default();
         let allowed = preflight_origin(&cors_config, "http://127.0.0.1").await;
         assert_eq!(allowed.as_deref(), Some("http://127.0.0.1"));
     }
+    // template:end oauth
 
+    // template:begin oauth
     /// A PIN long enough to pass the startup rules.
     const VALID_PIN: &str = "12345678";
 
@@ -488,6 +502,7 @@ mod tests {
         config.mcp.oauth_pin = pin.map(SecretString::from);
         config
     }
+    // template:end oauth
 
     fn non_loopback() -> SocketAddr {
         SocketAddr::from(([203, 0, 113, 1], 8080))
@@ -497,6 +512,7 @@ mod tests {
         SocketAddr::from(([127, 0, 0, 1], 8080))
     }
 
+    // template:begin oauth
     /// Asserts the refusal names every way to set the PIN.
     fn assert_names_pin_settings(err: &anyhow::Error) {
         let message = err.to_string();
@@ -510,7 +526,6 @@ mod tests {
             assert!(message.contains(setting), "missing {setting} in: {message}");
         }
     }
-
     #[test]
     fn oauth_refuses_wildcard_cors_origin() {
         let config = oauth_config(
@@ -523,7 +538,6 @@ mod tests {
             .expect_err("wildcard CORS under oauth must be refused");
         assert!(err.to_string().contains("wildcard"), "got: {err}");
     }
-
     #[test]
     fn oauth_refuses_plaintext_on_non_loopback() {
         let config = oauth_config(
@@ -536,7 +550,6 @@ mod tests {
             .expect_err("plaintext oauth off-loopback must be refused");
         assert!(err.to_string().contains("plain HTTP"), "got: {err}");
     }
-
     #[test]
     fn oauth_allows_plaintext_on_non_loopback_with_override() {
         let config = oauth_config(
@@ -548,7 +561,6 @@ mod tests {
         HttpAuth::resolve(&config, &non_loopback())
             .expect("override permits plaintext oauth off-loopback");
     }
-
     #[test]
     fn oauth_carries_the_base_url_and_pin() {
         let config = oauth_config(
@@ -566,7 +578,6 @@ mod tests {
             Some(VALID_PIN)
         );
     }
-
     #[test]
     fn oauth_refuses_no_pin_on_non_loopback_https() {
         let config = oauth_config(
@@ -580,7 +591,6 @@ mod tests {
         assert!(err.to_string().contains("consent PIN"), "got: {err}");
         assert_names_pin_settings(&err);
     }
-
     #[test]
     fn oauth_insecure_http_override_does_not_waive_pin() {
         let config = oauth_config(
@@ -594,7 +604,6 @@ mod tests {
         assert!(err.to_string().contains("consent PIN"), "got: {err}");
         assert_names_pin_settings(&err);
     }
-
     /// An oauth config on `addr` with `pin`, served over HTTPS off loopback.
     fn oauth_config_for(addr: &SocketAddr, pin: &str) -> ServerConfig {
         if addr.ip().is_loopback() {
@@ -608,7 +617,6 @@ mod tests {
             )
         }
     }
-
     #[test]
     fn oauth_refuses_empty_or_whitespace_pin_on_every_bind() {
         for pin in ["", " ", "        ", "\t\n         "] {
@@ -623,7 +631,6 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn oauth_refuses_seven_character_pin_on_every_bind() {
         // Seven characters, counted as characters: the second is 14 bytes.
@@ -639,7 +646,6 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn oauth_allows_eight_character_pin_on_every_bind() {
         for pin in [VALID_PIN, "éééééééé"] {
@@ -649,7 +655,6 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn oauth_allows_no_pin_on_loopback() {
         let config = oauth_config(vec!["http://localhost"], None, false, None);
@@ -660,6 +665,7 @@ mod tests {
         };
         assert!(settings.pin.is_none());
     }
+    // template:end oauth
 
     #[test]
     fn none_mode_refuses_non_loopback() {
@@ -716,6 +722,7 @@ mod tests {
         assert_eq!(token.expose_secret(), "s3cret");
     }
 
+    // template:begin oauth
     /// Only the OAuth mode's handler requires scopes.
     #[test]
     fn http_tools_require_scopes_only_under_oauth() {
@@ -738,6 +745,7 @@ mod tests {
             assert!(!tools.confirm_destructive, "{auth:?}");
         }
     }
+    // template:end oauth
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
@@ -1030,6 +1038,7 @@ mod wire_tests {
         assert_eq!(result["tools"].as_array().map(Vec::len), Some(5));
     }
 
+    // template:begin oauth
     /// A modern `tools/call` of `name` with `arguments`, with every routing
     /// header a 2026-07-28 client sends, including the `Mcp-Param-Item-Id`
     /// promoted from `id`, as `bearer`.
@@ -1065,7 +1074,6 @@ mod wire_tests {
             .body(Body::from(body.to_string()))
             .expect("request builds")
     }
-
     /// The OAuth middleware's scopes reach `call_tool` through the streamable
     /// HTTP transport: a `read` token is refused a write tool on the wire and
     /// the upstream is never contacted, while a `write` token reaches it.
@@ -1138,6 +1146,7 @@ mod wire_tests {
         assert_ne!(write["isError"], true, "{write}");
         assert_eq!(write["structuredContent"]["deleted"], true, "{write}");
     }
+    // template:end oauth
 
     /// Every stateless request and legacy session gets the one handler built
     /// at startup rather than a freshly assembled router.

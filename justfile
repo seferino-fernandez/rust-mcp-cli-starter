@@ -65,6 +65,7 @@ install-cli:
 install-mcp:
     cargo install --path crates/myapp-mcp
 
+# template:begin http
 # Run myapp-mcp (HTTP transport) and the MCP Inspector UI in parallel; point the UI at http://127.0.0.1:8080/mcp
 [parallel]
 inspect: debug-mcp inspector-ui
@@ -77,6 +78,7 @@ debug-mcp:
 inspector-ui:
     npx -y @modelcontextprotocol/inspector@latest
 
+# template:end http
 # Build the project in release mode for production
 release:
     cargo build --release

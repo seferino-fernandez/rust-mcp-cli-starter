@@ -35,17 +35,23 @@ clap_mangen = "0.3.3"
 clap-verbosity-flag = { version = "3.0.4", default-features = false, features = ["tracing"] }
 comfy-table = "8.0.1"
 rmcp = "3.10.0"
+# template:begin http
 axum = "0.8.9"
 tokio-util = "0.7.20"
 subtle = "2.6.1"
 sha2 = "0.11.1"
+# template:end http
 base64 = "0.23.1"
+# template:begin oauth
 serde_urlencoded = "0.7.1"
 urlencoding = "2.1.3"
 tower-http = "0.7.1"
+# template:end oauth
 wiremock = "0.6.5"
 tempfile = "3.27.0"
+# template:begin http
 tower = "0.5.3"
+# template:end http
 url = "2.5.8"
 assert_cmd = "2.2.2"
 predicates = "3.1.4"

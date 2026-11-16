@@ -11,6 +11,7 @@ ignore = [
     "pre-script.rhai",
     "cargo-generate.toml",
     ".github/workflows/template.yml",
+    "scripts/check-generated.sh",
 ]
 # Files copied verbatim, without Liquid rendering. The justfile uses just's
 # own `{{shell}}` / `{{dir}}` interpolation, which Liquid would otherwise
@@ -19,6 +20,7 @@ exclude = ["justfile"]
 
 [placeholders]
 github_org = { type = "string", prompt = "GitHub user or organization that will host the repository?", default = "your-org", regex = "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$" }
+mcp_transport = { type = "string", prompt = "MCP support? (stdio, stdio + HTTP, or stdio + HTTP + OAuth)", choices = ["stdio", "http", "http-oauth"], default = "stdio" }
 
 [hooks]
 pre = ["pre-script.rhai"]

@@ -19,7 +19,7 @@ auth, config, and error handling live in one place:
             myapp-core  (ApiClient, Config, models, errors)
               /     \
        myapp-cli   myapp-mcp
-     (clap CLI)   (rmcp: stdio + streamable HTTP)
+     (clap CLI)   (MCP tools)
 ```
 
 ## Quick start
@@ -48,8 +48,7 @@ Configuration is layered, highest precedence first:
 CLI flag, then `MYAPP_*` env, then `MYAPP_*_FILE` env, then `config.toml`, then
 built-in defaults. See [`config.toml.example`](config.toml.example) for every setting.
 Only the winning layer of a secret is read, so a `*_FILE` behind a higher layer
-is never opened, and the MCP server's stdio transport never reads the
-HTTP-only `token` and `oauth_pin`. Mistakes fail at startup: an env value that
+is never opened. Mistakes fail at startup: an env value that
 does not parse is an error naming the variable, a config file named by
 `--config` or `MYAPP_CONFIG` must exist, and a TOML error reports the line and
 column without echoing the line.
@@ -117,23 +116,29 @@ myapp man ~/.local/share/man/man1
 ## MCP server
 
 `myapp-mcp` implements MCP **2026-07-28** (`rmcp 3.x`) and exposes the same API to
-LLM clients over two transports:
+LLM clients through the following transports:
 
 - `stdio`: for local clients such as Claude Desktop.
+<!-- template:begin http -->
 - `http` (streamable HTTP): for networked clients, with a choice of auth mode:
     - `token`: static bearer token (constant-time compared).
+<!-- template:begin oauth -->
     - `oauth`: OAuth 2.1 authorization-code flow with PKCE, public clients,
       a server-rendered consent page, and a consent PIN (required off loopback).
+<!-- template:end oauth -->
     - `none`: no auth (loopback only).
 
 Older clients still negotiate down: the server accepts every protocol version
 rmcp knows, so a 2025-11-25 client keeps its session and resumability while a
 2026-07-28 client is served statelessly.
 
+<!-- template:end http -->
+Launch `myapp-mcp` from your MCP client with `MYAPP_BASE_URL` and `MYAPP_API_KEY`
+in its environment. The server defaults to stdio; logs go to stderr.
+
 Tool names carry a `myapp_` prefix. Tool input schemas are closed
 (`additionalProperties: false`) and unknown arguments are refused, tool results
-are capped to a configurable byte budget, OAuth tokens without the `write`
-scope may call only read-only tools, and destructive tools ask capable clients
+are capped to a configurable byte budget, and destructive tools ask capable clients
 for confirmation (`confirm_destructive`). Tool results pass through
 `Redacted<T>`, which masks the credential forms listed in the
 [`myapp-core` README](crates/myapp-core/README.md#redaction) and the configured API key;

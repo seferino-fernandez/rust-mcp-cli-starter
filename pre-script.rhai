@@ -1,7 +1,7 @@
-// Pre-generation hook: rename the concrete template identity (myapp / MYAPP)
-// to the user's chosen project name, then rename the crate directories.
+// Pre-generation hook: select MCP capabilities, then rename the concrete
+// template identity (myapp / MYAPP) and the crate directories.
 //
-// Requires a POSIX sh (find/grep/sed) and a `cargo` binary in PATH at
+// Requires a POSIX sh (find/grep/sed/awk) and a `cargo` binary in PATH at
 // generation time: standard on Linux/macOS dev environments. In-place edits
 // use a portable temp-file rewrite (no `sed -i`), because GNU sed (Linux) and
 // BSD sed (macOS) parse `-i` incompatibly. So the script runs unmodified on
@@ -19,13 +19,65 @@
 // `cargo-generate.toml`, and the template's own CI workflow from generated
 // projects, so no file::delete is needed for those.
 //
-// SECURITY: only the kebab project name and the regex-validated `github_org`
-// placeholder are interpolated into shell commands. Free-form values (such as
+// SECURITY: only the kebab project name, the regex-validated `github_org`
+// and computed booleans are interpolated into shell commands. Free-form values (such as
 // `authors`) must never reach system::command; use file::write instead.
 
 let kebab = variable::get("project-name");   // e.g. acme-tools  (kebab)
 let snake  = variable::get("crate_name");    // e.g. acme_tools  (snake)
 let org    = variable::get("github_org");    // e.g. acme-corp   (regex-validated)
+let transport = variable::get("mcp_transport");
+let include_http = transport != "stdio";
+let include_oauth = transport == "http-oauth";
+
+// Select source before renaming. Comment-delimited regions keep the template
+// itself buildable; generation removes both unselected regions and all markers.
+// Nested regions are checked so a malformed boundary fails generation.
+let select_script = `
+set -eu
+find . -type f ! -path './.git/*' ! -path './target/*' \
+  ! -name 'pre-script.rhai' ! -name 'check-generated.sh' | while IFS= read -r f; do
+  if grep -qE 'template:(begin|end)' "$f"; then
+    awk -v http=` + include_http + ` -v oauth=` + include_oauth + ` '
+      BEGIN { depth = 0; keep[0] = 1 }
+      /^[[:space:]]*(\/\/|#|<!--) template:begin / {
+        feature = $3
+        if (feature != "http" && feature != "oauth") exit 1
+        depth++
+        names[depth] = feature
+        keep[depth] = keep[depth - 1] && ((feature == "http" ? http : oauth) == "true")
+        next
+      }
+      /^[[:space:]]*(\/\/|#|<!--) template:end / {
+        if (depth == 0 || names[depth] != $3) exit 1
+        delete names[depth]
+        delete keep[depth]
+        depth--
+        next
+      }
+      keep[depth] { print }
+      END { if (depth != 0) exit 1 }
+    ' "$f" > "$f.cgtmp" || { echo "Invalid template boundary in $f" >&2; exit 1; }
+    mv "$f.cgtmp" "$f"
+  fi
+done
+`;
+system::command(select_script);
+
+if !include_oauth {
+    file::delete("crates/myapp-mcp/src/oauth");
+    file::delete("crates/myapp-mcp/src/middleware/oauth.rs");
+    file::delete("crates/myapp-mcp/src/middleware/cors.rs");
+    file::delete("crates/myapp-mcp/src/tools/scope.rs");
+}
+if !include_http {
+    file::delete("crates/myapp-mcp/src/http.rs");
+    file::delete("crates/myapp-mcp/src/middleware");
+    file::delete("crates/myapp-mcp/src/secret_digest.rs");
+    file::delete("Dockerfile");
+    file::delete(".dockerignore");
+    file::delete("deploy");
+}
 
 // Compute SCREAMING_SNAKE env-var prefix.
 // to_upper() is NOT a built-in rhai string method; use the heck helper
@@ -93,9 +145,11 @@ set -eu
 image_org=$(printf '%s' '` + org + `' | tr 'A-Z' 'a-z')
 sed -e 's#github.com/your-org/your-project#github.com/` + org + `/` + kebab + `#g' \
   Cargo.toml > Cargo.toml.cgtmp && mv Cargo.toml.cgtmp Cargo.toml
-sed -e "s#ghcr.io/your-org/#ghcr.io/$image_org/#g" \
-  deploy/compose.yaml > deploy/compose.yaml.cgtmp \
-  && mv deploy/compose.yaml.cgtmp deploy/compose.yaml
+if [ -f deploy/compose.yaml ]; then
+  sed -e "s#ghcr.io/your-org/#ghcr.io/$image_org/#g" \
+    deploy/compose.yaml > deploy/compose.yaml.cgtmp \
+    && mv deploy/compose.yaml.cgtmp deploy/compose.yaml
+fi
 `;
 
 system::command(url_script);
@@ -143,3 +197,7 @@ file::rename("crates/myapp-mcp",  "crates/" + kebab + "-mcp");
 // workspace correctly.
 // -------------------------------------------------------------------------
 system::command("cargo fmt --all");
+
+// Prune removed dependencies from the renamed, tested lockfile. --workspace
+// preserves locked registry versions instead of upgrading the dependency graph.
+system::command("cargo update --workspace");

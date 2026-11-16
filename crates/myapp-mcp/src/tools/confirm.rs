@@ -13,8 +13,7 @@
 //! is refused and the tool runs at most once per confirmation.
 //!
 //! This is a courtesy against a model acting on its own, not access control:
-//! a client without form elicitation runs the tool directly, and the OAuth
-//! `write` scope is what actually gates mutation.
+//! a client without form elicitation runs the tool directly.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock, PoisonError};

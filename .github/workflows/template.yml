@@ -20,6 +20,10 @@ env:
 jobs:
     generate:
         runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                transport: [stdio, http, http-oauth]
         steps:
             - uses: actions/checkout@v7
               with:
@@ -42,6 +46,11 @@ jobs:
             # output to the template's own workspace.
             - name: Generate project from template
               run: |
+                  # Exercise the actual default by omitting the choice for stdio.
+                  transport_args=()
+                  if [ "${{ matrix.transport }}" != stdio ]; then
+                      transport_args=(--define "mcp_transport=${{ matrix.transport }}")
+                  fi
                   cargo generate \
                       --path "$GITHUB_WORKSPACE" \
                       --name "$PROJECT_NAME" \
@@ -49,12 +58,17 @@ jobs:
                       --silent \
                       --define github_org=acme-corp \
                       --define 'authors=Template CI <ci@example.com>' \
+                      "${transport_args[@]}" \
                       --destination "$RUNNER_TEMP"
                   echo "PROJECT_DIR=$RUNNER_TEMP/$PROJECT_NAME" >> "$GITHUB_ENV"
 
             - uses: Swatinem/rust-cache@v2
               with:
                   workspaces: ${{ env.PROJECT_DIR }}
+                  key: template-${{ matrix.transport }}
+
+            - name: Check selected capabilities
+              run: bash scripts/check-generated.sh "$PROJECT_DIR" "${{ matrix.transport }}"
 
             # Case-sensitive on purpose: tests legitimately contain "MyApp".
             - name: Check for leftover template identifiers
@@ -120,6 +134,9 @@ jobs:
             - name: Run doc tests
               working-directory: ${{ env.PROJECT_DIR }}
               run: cargo test --doc
+
+            - name: Check generated CLI surface
+              run: bash scripts/check-generated.sh "$PROJECT_DIR" "${{ matrix.transport }}" cli
 
             - name: Build docs
               working-directory: ${{ env.PROJECT_DIR }}

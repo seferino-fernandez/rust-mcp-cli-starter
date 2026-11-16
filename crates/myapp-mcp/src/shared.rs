@@ -3,7 +3,10 @@
 use clap::{Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 
-use crate::auth::{AuthMode, Transport};
+use crate::auth::Transport;
+// template:begin http
+use crate::auth::AuthMode;
+// template:end http
 use crate::commands::completions::CompletionShell;
 
 use crate::config::{ServerConfig, ServerOverrides};
@@ -49,6 +52,7 @@ pub struct Args {
     #[arg(long)]
     pub api_key: Option<String>,
 
+    // template:begin http
     #[expect(
         clippy::doc_markdown,
         rustdoc::broken_intra_doc_links,
@@ -72,6 +76,7 @@ pub struct Args {
     #[arg(long)]
     pub token: Option<String>,
 
+    // template:begin oauth
     #[expect(
         clippy::doc_markdown,
         reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
@@ -79,7 +84,7 @@ pub struct Args {
     /// External base URL for OAuth metadata [env: MYAPP_MCP_BASE_URL].
     #[arg(long)]
     pub mcp_base_url: Option<String>,
-
+    // template:end oauth
     #[expect(
         clippy::doc_markdown,
         reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
@@ -88,6 +93,7 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub auth_mode: Option<AuthMode>,
 
+    // template:begin oauth
     #[expect(
         clippy::doc_markdown,
         reason = "clap renders this doc comment verbatim as --help text, so backticks would show"
@@ -95,6 +101,8 @@ pub struct Args {
     /// PIN required on the OAuth consent screen [env: MYAPP_MCP_OAUTH_PIN].
     #[arg(long)]
     pub oauth_pin: Option<String>,
+    // template:end oauth
+    // template:end http
 }
 
 /// Subcommands for the MCP server binary.
@@ -126,16 +134,23 @@ impl Args {
                 base_url: self.base_url.clone(),
                 api_key: secret(&self.api_key),
             },
+            // template:begin http
             host: self.host.clone(),
             port: self.port,
             token: secret(&self.token),
+            // template:begin oauth
             base_url: self.mcp_base_url.clone(),
+            // template:end oauth
             auth_mode: self.auth_mode,
+            // template:begin oauth
             oauth_pin: secret(&self.oauth_pin),
+            // template:end oauth
+            // template:end http
         }
     }
 }
 
+// template:begin oauth
 /// Resolves the external base URL for OAuth metadata, warning on plain HTTP
 /// over a non-loopback address.
 pub fn resolve_base_url(config: &ServerConfig, addr: &std::net::SocketAddr) -> String {
@@ -150,6 +165,7 @@ pub fn resolve_base_url(config: &ServerConfig, addr: &std::net::SocketAddr) -> S
     base_url
 }
 
+// template:end oauth
 /// Builds an authenticated [`ApiClient`](myapp_core::ApiClient) from config (eager; no login flow).
 pub fn create_api_client(config: &ServerConfig) -> anyhow::Result<myapp_core::ApiClient> {
     Ok(myapp_core::ApiClient::new(config.core.clone())?)
@@ -163,8 +179,10 @@ mod tests {
     fn transport_defaults_to_stdio_and_rejects_unknown_names() {
         let args = Args::try_parse_from(["myapp-mcp"]).unwrap();
         assert_eq!(args.transport, Transport::Stdio);
+        // template:begin http
         let args = Args::try_parse_from(["myapp-mcp", "--transport", "http"]).unwrap();
         assert_eq!(args.transport, Transport::Http);
+        // template:end http
         let parsed = Args::try_parse_from(["myapp-mcp", "--transport", "sse"]);
         assert_eq!(
             parsed.err().map(|err| err.kind()),

@@ -1,20 +1,9 @@
-//! Typed vocabulary for how the server is reached and authenticated.
-//!
-//! - [`AuthMode`]: how the HTTP transport authenticates requests.
-//! - [`Transport`]: how the server talks to its MCP client.
-//! - [`Scope`] and [`Scopes`]: the OAuth scopes granted to an access token.
-//!
-//! The first two are clap [`ValueEnum`](clap::ValueEnum)s, so the command
-//! line, the `MYAPP_MCP_AUTH_MODE` env var and the `[mcp] auth_mode` TOML key
-//! accept exactly the same names, and an unknown name fails at load.
-//!
-//! The OAuth bearer middleware inserts [`Scopes`] into the request extensions
-//! and the tool handler reads them back, so neither layer depends on the other.
+//! Transport and endpoint authentication vocabulary.
 
 use std::fmt::{Display, Formatter};
 
+// template:begin http
 use serde::Deserialize;
-
 /// How the HTTP transport authenticates requests to the MCP endpoint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -22,9 +11,11 @@ pub enum AuthMode {
     /// A static bearer token.
     #[default]
     Token,
+    // template:begin oauth
     /// OAuth 2.1 with PKCE.
     #[value(name = "oauth")]
     OAuth,
+    // template:end oauth
     /// No authentication; allowed on loopback addresses only.
     None,
 }
@@ -34,7 +25,9 @@ impl AuthMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Token => "token",
+            // template:begin oauth
             Self::OAuth => "oauth",
+            // template:end oauth
             Self::None => "none",
         }
     }
@@ -46,29 +39,36 @@ impl Display for AuthMode {
     }
 }
 
+// template:end http
 /// How the server talks to its MCP client, chosen with `--transport`.
+// template:begin http
 ///
 /// `stdio` serves one local client over stdin/stdout; `http` serves the
-/// streamable HTTP transport, the only one that reads the bearer `token` and
-/// `oauth_pin`.
+/// streamable HTTP transport.
+// template:end http
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Transport {
     /// Standard input and output, for a local client.
     #[default]
     Stdio,
+    // template:begin http
     /// Streamable HTTP, for a network service.
     Http,
+    // template:end http
 }
 
 impl Display for Transport {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Stdio => "stdio",
+            // template:begin http
             Self::Http => "http",
+            // template:end http
         })
     }
 }
 
+// template:begin oauth
 /// A single OAuth scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -166,11 +166,13 @@ impl Display for Scopes {
     }
 }
 
+// template:end oauth
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::ValueEnum;
 
+    // template:begin http
     #[test]
     fn auth_mode_names_round_trip_through_clap_and_serde() {
         for mode in AuthMode::value_variants() {
@@ -181,12 +183,15 @@ mod tests {
             assert_eq!(parsed, *mode, "{name}");
         }
     }
+    // template:end http
 
+    // template:begin oauth
     #[test]
     fn kebab_cased_oauth_is_never_accepted() {
         AuthMode::from_str("o-auth", false).unwrap_err();
         serde_json::from_value::<AuthMode>(serde_json::json!("o-auth")).unwrap_err();
     }
+    // template:end oauth
 
     #[test]
     fn transport_names_round_trip_through_clap() {
@@ -197,6 +202,7 @@ mod tests {
         assert_eq!(Transport::default(), Transport::Stdio);
     }
 
+    // template:begin oauth
     #[test]
     fn scopes_display_in_canonical_order() {
         let mut scopes = Scopes::default();
@@ -205,7 +211,6 @@ mod tests {
         assert_eq!(scopes.to_string(), "read write");
         assert_eq!(scopes, Scopes::ALL);
     }
-
     #[test]
     fn scope_names_round_trip() {
         for scope in Scope::ALL {
@@ -215,7 +220,6 @@ mod tests {
         assert_eq!(Scope::parse("admin"), None);
         assert_eq!(Scope::parse("READ"), None);
     }
-
     #[test]
     fn scopes_contain_only_parsed_scopes() {
         let read = Scopes::parse(&["read", "admin"]);
@@ -225,4 +229,5 @@ mod tests {
         assert_eq!(Scopes::parse::<&str>(&[]).iter().count(), 0);
         assert_eq!(Scopes::default().to_string(), "");
     }
+    // template:end oauth
 }

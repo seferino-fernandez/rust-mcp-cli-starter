@@ -182,7 +182,9 @@ mod router_tests {
     use rmcp::ServerHandler;
     use rmcp::model::Tool;
     use serde_json::Value;
+    // template:begin http
     use std::collections::HashSet;
+    // template:end http
 
     /// Every registered tool, from a handler that is never called.
     fn listed_tools() -> Vec<Tool> {
@@ -358,6 +360,7 @@ mod router_tests {
         );
     }
 
+    // template:begin http
     /// The SEP-2243 `x-mcp-header` annotation must survive schema closing. The
     /// server looks the schema up through `get_tool` to validate inbound
     /// `Mcp-Param-*` headers against the request body, so if closing ever
@@ -377,7 +380,6 @@ mod router_tests {
             );
         }
     }
-
     /// Every `x-mcp-header` value is a valid HTTP header token, sits on a
     /// top-level primitive property, and names a header no other property of
     /// the same tool uses (header names compare case-insensitively).
@@ -438,6 +440,7 @@ mod router_tests {
             "the example tools promote at least one header"
         );
     }
+    // template:end http
 
     /// Whether `schema`, resolving `$ref` against `root`, is an object schema
     /// with its own `properties`, or an array (or `anyOf`/`oneOf`/`allOf`

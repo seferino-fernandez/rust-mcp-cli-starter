@@ -90,6 +90,7 @@ fn missing_env_config_file_is_an_error_naming_the_variable() {
         ));
 }
 
+// template:begin http
 #[test]
 fn kebab_cased_auth_mode_is_rejected() {
     Command::cargo_bin("myapp-mcp")
@@ -99,7 +100,6 @@ fn kebab_cased_auth_mode_is_rejected() {
         .failure()
         .stderr(contains("invalid value 'o-auth'"));
 }
-
 #[test]
 fn http_refuses_a_whitespace_token_at_startup() {
     let config =
@@ -117,3 +117,4 @@ fn http_refuses_a_whitespace_token_at_startup() {
         .failure()
         .stderr(contains("requires a non-empty token").and(contains("MYAPP_MCP_TOKEN_FILE")));
 }
+// template:end http

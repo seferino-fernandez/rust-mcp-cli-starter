@@ -30,13 +30,14 @@ request_timeout_secs = 30
 connect_timeout_secs = 10
 
 [mcp]
+# template:begin http
 # HTTP transport bind. Env: MYAPP_MCP_HOST / MYAPP_MCP_PORT
 # host must be an IP literal: "127.0.0.1", "::1", "[::1]" or "fe80::1%2"
 # (numeric scope id). Hostnames such as "localhost" are refused.
 # host = "127.0.0.1"
 # port = 8080
 
-# Auth mode for the MCP endpoint: "token" | "oauth" | "none".
+# Authentication mode for the MCP endpoint (see the MCP README).
 # Any other value fails at startup. Env: MYAPP_MCP_AUTH_MODE
 # auth_mode = "token"
 
@@ -46,6 +47,8 @@ connect_timeout_secs = 10
 # token = ""
 # token_file = "/run/secrets/myapp-mcp-token"
 
+# template:end http
+# template:begin oauth
 # External base URL for OAuth metadata. Env: MYAPP_MCP_BASE_URL
 # base_url = "https://mcp.example.com"
 
@@ -56,6 +59,7 @@ connect_timeout_secs = 10
 # oauth_pin = ""
 # oauth_pin_file = "/run/secrets/myapp-mcp-oauth-pin"
 
+# template:end oauth
 # Cap on the whole serialized tool result (bytes); oversized results are
 # replaced with a bounded `response_too_large` error, or fail with a protocol
 # error when even that cannot fit. Env: MYAPP_MCP_MAX_RESPONSE_BYTES
@@ -66,6 +70,7 @@ connect_timeout_secs = 10
 # Env: MYAPP_MCP_CONFIRM_DESTRUCTIVE
 # confirm_destructive = true
 
+# template:begin http
 # Hostnames accepted in the inbound `Host` header (DNS-rebinding guard).
 # Defaults to loopback, so binding to a non-loopback address REQUIRES setting
 # this: requests carrying your public hostname are otherwise rejected with 403
@@ -73,3 +78,4 @@ connect_timeout_secs = 10
 # Entries may include a port, e.g. "example.com:8443".
 # An empty list disables the check and accepts any Host
 # allowed_hosts = ["localhost", "127.0.0.1", "::1"]
+# template:end http

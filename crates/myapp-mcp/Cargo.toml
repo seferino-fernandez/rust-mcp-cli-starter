@@ -32,25 +32,36 @@ clap-verbosity-flag = { workspace = true }
 rmcp = { workspace = true, features = [
     "server",
     "transport-io",
+    # template:begin http
     "transport-streamable-http-server",
+    # template:end http
     "macros",
     "schemars",
     "request-state",
 ] }
 schemars.workspace = true
 uuid.workspace = true
+# template:begin http
 axum = { workspace = true, features = ["http1", "tokio"] }
 tokio-util.workspace = true
 subtle.workspace = true
 sha2.workspace = true
+# template:end http
+# template:begin oauth
 base64.workspace = true
 serde_urlencoded.workspace = true
 url.workspace = true
 tower-http = { workspace = true, features = ["cors"] }
+# template:end oauth
 
 [dev-dependencies]
+base64.workspace = true
+# template:begin http
 tower.workspace = true
+# template:end http
+# template:begin oauth
 urlencoding.workspace = true
+# template:end oauth
 assert_cmd.workspace = true
 predicates.workspace = true
 tempfile.workspace = true

@@ -1,11 +1,10 @@
 //! `myapp-mcp`: Model Context Protocol server exposing the MYAPP API as tools
 //! an LLM client can call.
 //!
-//! Two transports are supported: `stdio` (recommended for local agent
-//! integrations like Claude Desktop, Claude Code, Cursor) and `http`
-//! (for remote deployments). Authentication can be configured via OAuth
-//! 2.1 with PKCE, a static bearer token, or no authentication at all,
-//! controlled by the `[mcp].auth_mode` config field.
+//! Serves local MCP clients over standard input and output.
+// template:begin http
+//! Also supports streamable HTTP with configurable endpoint authentication.
+// template:end http
 
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
@@ -14,10 +13,16 @@
 mod auth;
 mod commands;
 mod config;
+// template:begin http
 mod http;
 mod middleware;
+// template:end http
+// template:begin oauth
 mod oauth;
+// template:end oauth
+// template:begin http
 mod secret_digest;
+// template:end http
 mod shared;
 mod stdio;
 mod tools;
@@ -83,15 +88,19 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(
         transport = %args.transport,
+        // template:begin http
         auth_mode = %config.mcp.auth_mode,
         host = %config.mcp.host,
         port = %config.mcp.port,
+        // template:end http
         "myapp-mcp starting"
     );
 
     match args.transport {
         Transport::Stdio => stdio::serve(&config).await?,
+        // template:begin http
         Transport::Http => http::serve(&config).await?,
+        // template:end http
     }
 
     Ok(())

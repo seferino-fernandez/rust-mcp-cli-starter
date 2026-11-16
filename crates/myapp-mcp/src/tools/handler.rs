@@ -14,7 +14,7 @@ use super::server::close_tool_schemas;
 
 /// MCP tool handler for the MYAPP API.
 ///
-/// A cheap handle: cloning it bumps one reference count, so every HTTP request
+/// A cheap handle: cloning it bumps one reference count, so every request
 /// shares the client, the tool router and the advertised tools built by
 /// [`AppTools::new`].
 #[derive(Clone)]
@@ -36,11 +36,13 @@ pub struct Inner {
     pub(super) max_response_bytes: usize,
     /// Whether destructive tools ask capable clients for confirmation first.
     pub(crate) confirm_destructive: bool,
+    // template:begin oauth
     /// Whether every call must carry OAuth [`Scopes`](crate::auth::Scopes).
     /// Set when the HTTP transport authenticates with OAuth, so a request
     /// that somehow reaches a tool without them is limited to read-only
     /// tools rather than allowed everything.
     pub(crate) require_scopes: bool,
+    // template:end oauth
     /// The confirmations already used, shared by every handle so each runs
     /// its tool at most once.
     pub(super) consumed_confirmations: Arc<ConsumedConfirmations>,
@@ -48,7 +50,7 @@ pub struct Inner {
 
 impl AppTools {
     /// Builds a handler around an already-constructed client, with
-    /// destructive-tool confirmation on and OAuth scopes not required.
+    /// destructive-tool confirmation on.
     ///
     /// Combines every tool router and closes each tool's schemas once, so
     /// requests never rebuild routes or copy schemas. Build once per server
@@ -68,7 +70,9 @@ impl AppTools {
             advertised,
             max_response_bytes,
             confirm_destructive: true,
+            // template:begin oauth
             require_scopes: false,
+            // template:end oauth
             consumed_confirmations: Arc::default(),
         }))
     }
@@ -82,6 +86,7 @@ impl AppTools {
         self
     }
 
+    // template:begin oauth
     /// Requires OAuth scopes on every call, failing closed to read-only tools
     /// when a request carries none. Set for the HTTP transport's OAuth mode;
     /// stdio and the `token` and `none` modes leave it off.
@@ -91,6 +96,7 @@ impl AppTools {
         self
     }
 
+    // template:end oauth
     /// The shared tool router, schemas already closed.
     #[cfg(test)]
     pub(crate) fn router(&self) -> &ToolRouter<Self> {
