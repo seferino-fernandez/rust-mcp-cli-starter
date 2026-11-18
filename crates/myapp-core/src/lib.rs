@@ -4,11 +4,12 @@
 //! methods. Replace the example `models`, `api`, and `endpoints` with your own.
 
 #![doc = include_str!("../README.md")]
-#![warn(missing_docs)]
-#![forbid(unsafe_code)]
 
 /// API path constants.
 pub mod api;
+/// Static shell completions and man pages for the workspace binaries.
+#[cfg(feature = "cli")]
+pub mod cli;
 /// The [`ApiClient`] HTTP wrapper.
 pub mod client;
 /// Configuration loading.

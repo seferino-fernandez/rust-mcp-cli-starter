@@ -5,24 +5,32 @@ allow-expect-in-tests = true
 allow-dbg-in-tests = true
 # Words `doc_markdown` accepts without backticks. ".." keeps clippy's defaults.
 doc-valid-idents = [
-    "..",
-    "API",
-    "APIs",
-    "CLI",
-    "CSRF",
-    "HTTP",
-    "HTTPS",
-    "JSON",
-    "LLM",
-    "MCP",
-    # Generation renames this to the project's SCREAMING_SNAKE name, which
-    # doc_markdown would otherwise flag in prose such as "the MYAPP API".
-    "MYAPP",
-    "MyApp",
-    "OAuth",
-    "PKCE",
-    "TOML",
-    "URL",
-    "URLs",
-    "UUID",
+  "..",
+  "API",
+  "APIs",
+  "CLI",
+  "CSRF",
+  "HTTP",
+  "HTTPS",
+  "JSON",
+  "LLM",
+  "MCP",
+  # Generation renames this to the project's SCREAMING_SNAKE name, which
+  # doc_markdown would otherwise flag in prose such as "the MYAPP API".
+  "MYAPP",
+  "MyApp",
+  "OAuth",
+  "PKCE",
+  "TOML",
+  "URL",
+  "URLs",
+  "UUID",
 ]
+
+# Complexity budgets
+too-many-lines-threshold = 80
+cognitive-complexity-threshold = 15
+too-many-arguments-threshold = 5
+excessive-nesting-threshold = 5
+max-fn-params-bools = 2
+max-struct-bools = 3

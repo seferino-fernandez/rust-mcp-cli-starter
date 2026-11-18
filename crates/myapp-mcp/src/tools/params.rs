@@ -14,7 +14,7 @@ use serde::de::DeserializeOwned;
 /// Parameters for `myapp_list_items`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ListItemsParams {
+pub(super) struct ListItemsParams {
     /// 1-based page number.
     #[serde(default = "default_page")]
     #[schemars(range(min = 1))]
@@ -35,7 +35,7 @@ fn default_page_size() -> u32 {
 /// Parameters for `myapp_get_item` / `myapp_delete_item`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ItemIdParams {
+pub(super) struct ItemIdParams {
     /// Item id.
     // template:begin http
     ///
@@ -54,7 +54,7 @@ pub struct ItemIdParams {
 /// Parameters for `myapp_create_item`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct CreateItemParams {
+pub(super) struct CreateItemParams {
     /// Item name.
     pub name: String,
     /// Whether the item starts enabled.
@@ -211,8 +211,7 @@ mod tests {
             .content
             .first()
             .and_then(|content| content.as_text())
-            .map(|text| text.text.clone())
-            .unwrap_or_default();
+            .map_or_default(|text| text.text.clone());
         assert!(
             text.starts_with("failed to deserialize parameters: invalid type"),
             "{text}"

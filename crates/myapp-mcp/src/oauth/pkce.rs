@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 /// Verify a PKCE S256 code challenge.
 /// Returns true if `BASE64URL_NO_PAD(SHA256(verifier)) == challenge`.
-pub fn verify_s256(verifier: &str, challenge: &str) -> bool {
+pub(crate) fn verify_s256(verifier: &str, challenge: &str) -> bool {
     let hash = Sha256::digest(verifier.as_bytes());
     let computed = URL_SAFE_NO_PAD.encode(hash);
     computed == challenge
@@ -13,7 +13,7 @@ pub fn verify_s256(verifier: &str, challenge: &str) -> bool {
 
 /// Verify a PKCE code challenge made with `method`. Only `S256` is
 /// supported, so any other method never verifies.
-pub fn verify(method: &str, verifier: &str, challenge: &str) -> bool {
+pub(crate) fn verify(method: &str, verifier: &str, challenge: &str) -> bool {
     match method {
         "S256" => verify_s256(verifier, challenge),
         _ => false,
@@ -22,7 +22,7 @@ pub fn verify(method: &str, verifier: &str, challenge: &str) -> bool {
 
 /// The S256 challenge for `verifier`, for building test requests.
 #[cfg(test)]
-pub fn challenge_from_verifier(verifier: &str) -> String {
+pub(crate) fn challenge_from_verifier(verifier: &str) -> String {
     let hash = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(hash)
 }

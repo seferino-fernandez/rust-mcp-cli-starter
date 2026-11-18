@@ -7,11 +7,8 @@
 // template:end http
 
 #![doc = include_str!("../README.md")]
-#![warn(missing_docs)]
-#![forbid(unsafe_code)]
 
 mod auth;
-mod commands;
 mod config;
 // template:begin http
 mod http;
@@ -27,7 +24,7 @@ mod shared;
 mod stdio;
 mod tools;
 
-use std::io::stderr;
+use std::io::{Write, stderr};
 
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
@@ -35,7 +32,7 @@ use shared::{Args, Command};
 use tracing::level_filters::LevelFilter;
 
 use crate::auth::Transport;
-use crate::commands::{completions, man};
+use myapp_core::cli;
 
 use crate::config::ServerConfig;
 
@@ -52,13 +49,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Static completion scripts need no config, so emit and return early.
     if let Some(Command::Completions { shell }) = &args.command {
-        completions::run(*shell, Args::command());
+        cli::write_completions(*shell, Args::command());
         return Ok(());
     }
 
     // Man pages need no config, so emit and return early.
     if let Some(Command::Man { out_dir }) = &args.command {
-        man::run(Args::command(), out_dir)?;
+        cli::write_man_pages(Args::command(), out_dir)?;
         return Ok(());
     }
 
@@ -73,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
         .then(|| args.verbosity.tracing_level_filter());
     let (level, warning) = config.core.log.resolve_level(flag, DEFAULT_LOG_LEVEL);
     if let Some(warning) = warning {
-        eprintln!("myapp-mcp: warning: {warning}");
+        writeln!(stderr().lock(), "myapp-mcp: warning: {warning}")?;
     }
     tracing_subscriber::fmt()
         .with_writer(stderr)

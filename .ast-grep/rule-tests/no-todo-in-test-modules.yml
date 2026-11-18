@@ -1,0 +1,10 @@
+id: no-todo-in-test-modules
+valid:
+  - "mod production { fn unfinished() { todo!(); } }"
+  - "#[cfg(test)] mod tests { fn ready() { assert!(true); } }"
+  - "#[cfg(test)] fn test_helper() {}\nmod production { fn unfinished() { todo!(); } }"
+  - "#[cfg(test)] mod tests {}\nmod production { fn unfinished() { todo!(); } }"
+invalid:
+  - "#[cfg(test)] mod tests { fn unfinished() { todo!(); } }"
+  - "#[cfg(test)] mod tests { mod nested { fn unfinished() { unimplemented!(); } } }"
+  - "#[cfg(test)]\n#[expect(dead_code, reason = \"helper\")]\nmod tests { fn unfinished() { std::todo!(); } }"

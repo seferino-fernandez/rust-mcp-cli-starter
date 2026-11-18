@@ -1,0 +1,7 @@
+id: no-inner-lint-suppression
+valid:
+  - "#[expect(dead_code, reason = \"helper\")] fn helper() {}"
+  - "#![warn(dead_code)]\nfn helper() {}"
+invalid:
+  - "#![allow(dead_code)]\nfn helper() {}"
+  - "#![expect(dead_code, reason = \"helper\")]\nfn helper() {}"

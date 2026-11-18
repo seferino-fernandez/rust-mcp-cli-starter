@@ -15,4 +15,4 @@ mod server;
 pub(crate) mod test_support;
 mod types;
 
-pub use handler::AppTools;
+pub(crate) use handler::AppTools;

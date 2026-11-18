@@ -18,11 +18,11 @@ use super::server::close_tool_schemas;
 /// shares the client, the tool router and the advertised tools built by
 /// [`AppTools::new`].
 #[derive(Clone)]
-pub struct AppTools(Arc<Inner>);
+pub(crate) struct AppTools(Arc<Inner>);
 
 /// The state every [`AppTools`] handle shares.
 #[derive(Clone)]
-pub struct Inner {
+pub(crate) struct Inner {
     /// The upstream API client every tool calls.
     pub(super) client: ApiClient,
     /// Every tool route, with its input and output schemas already closed.
@@ -58,7 +58,7 @@ impl AppTools {
     ///
     /// `max_response_bytes` caps the serialized size of each tool result; see
     /// [`McpConfig::max_response_bytes`](crate::config::McpConfig).
-    pub fn new(client: ApiClient, max_response_bytes: usize) -> Self {
+    pub(crate) fn new(client: ApiClient, max_response_bytes: usize) -> Self {
         let mut router = Self::item_router();
         for route in router.map.values_mut() {
             close_tool_schemas(&mut route.attr);
@@ -80,7 +80,7 @@ impl AppTools {
     /// Enables or disables confirmation of destructive tools; see
     /// [`McpConfig::confirm_destructive`](crate::config::McpConfig).
     #[must_use]
-    pub fn with_confirm_destructive(mut self, enabled: bool) -> Self {
+    pub(crate) fn with_confirm_destructive(mut self, enabled: bool) -> Self {
         // Unshared right after `new`, so this updates in place.
         Arc::make_mut(&mut self.0).confirm_destructive = enabled;
         self
@@ -91,7 +91,7 @@ impl AppTools {
     /// when a request carries none. Set for the HTTP transport's OAuth mode;
     /// stdio and the `token` and `none` modes leave it off.
     #[must_use]
-    pub fn with_require_scopes(mut self, required: bool) -> Self {
+    pub(crate) fn with_require_scopes(mut self, required: bool) -> Self {
         Arc::make_mut(&mut self.0).require_scopes = required;
         self
     }

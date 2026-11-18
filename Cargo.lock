@@ -1439,8 +1439,6 @@ dependencies = [
  "clap",
  "clap-verbosity-flag",
  "clap_complete",
- "clap_complete_nushell",
- "clap_mangen",
  "comfy-table",
  "myapp-core",
  "predicates",
@@ -1455,6 +1453,10 @@ dependencies = [
 name = "myapp-core"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "clap_complete",
+ "clap_complete_nushell",
+ "clap_mangen",
  "dirs",
  "reqwest",
  "schemars",
@@ -1480,8 +1482,6 @@ dependencies = [
  "clap",
  "clap-verbosity-flag",
  "clap_complete",
- "clap_complete_nushell",
- "clap_mangen",
  "myapp-core",
  "predicates",
  "rmcp",

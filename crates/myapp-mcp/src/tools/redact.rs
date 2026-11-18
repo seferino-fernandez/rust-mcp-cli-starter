@@ -30,7 +30,7 @@ use serde_json::Value;
         reason = "template helper intended for downstream generated projects"
     )
 )]
-pub fn project_fields(value: Value, keys: &[&str]) -> Value {
+pub(super) fn project_fields(value: Value, keys: &[&str]) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
@@ -41,7 +41,11 @@ pub fn project_fields(value: Value, keys: &[&str]) -> Value {
             }
             Value::Object(out)
         }
-        other => other,
+        other @ (Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_)) => other,
     }
 }
 

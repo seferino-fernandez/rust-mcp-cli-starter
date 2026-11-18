@@ -7,7 +7,7 @@ use serde::Deserialize;
 /// How the HTTP transport authenticates requests to the MCP endpoint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
-pub enum AuthMode {
+pub(crate) enum AuthMode {
     /// A static bearer token.
     #[default]
     Token,
@@ -22,7 +22,7 @@ pub enum AuthMode {
 
 impl AuthMode {
     /// Returns the name used in config, env and on the command line.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Token => "token",
             // template:begin oauth
@@ -47,7 +47,7 @@ impl Display for AuthMode {
 /// streamable HTTP transport.
 // template:end http
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum Transport {
+pub(crate) enum Transport {
     /// Standard input and output, for a local client.
     #[default]
     Stdio,
@@ -71,7 +71,7 @@ impl Display for Transport {
 // template:begin oauth
 /// A single OAuth scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Scope {
+pub(crate) enum Scope {
     /// Permits only tools annotated read-only.
     Read,
     /// Permits every tool.
@@ -80,10 +80,10 @@ pub enum Scope {
 
 impl Scope {
     /// Every scope, in canonical order.
-    pub const ALL: [Self; 2] = [Self::Read, Self::Write];
+    pub(crate) const ALL: [Self; 2] = [Self::Read, Self::Write];
 
     /// Returns the scope's wire name.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
             Self::Write => "write",
@@ -91,7 +91,7 @@ impl Scope {
     }
 
     /// Parses a wire name, returning `None` for an unknown scope.
-    pub fn parse(name: &str) -> Option<Self> {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|scope| scope.as_str() == name)
     }
 
@@ -111,24 +111,24 @@ impl Display for Scope {
 
 /// A set of OAuth scopes, displayed space-separated in canonical order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Scopes(u8);
+pub(crate) struct Scopes(u8);
 
 impl Scopes {
     /// Every supported scope: what the bearer challenge advertises.
-    pub const ALL: Self = Self(Scope::Read.bit() | Scope::Write.bit());
+    pub(crate) const ALL: Self = Self(Scope::Read.bit() | Scope::Write.bit());
 
     /// Adds `scope` to the set.
-    pub const fn insert(&mut self, scope: Scope) {
+    pub(crate) const fn insert(&mut self, scope: Scope) {
         self.0 |= scope.bit();
     }
 
     /// Reports whether `scope` is in the set.
-    pub const fn contains(self, scope: Scope) -> bool {
+    pub(crate) const fn contains(self, scope: Scope) -> bool {
         self.0 & scope.bit() != 0
     }
 
     /// Iterates the scopes in the set in canonical order.
-    pub fn iter(self) -> impl Iterator<Item = Scope> {
+    pub(crate) fn iter(self) -> impl Iterator<Item = Scope> {
         Scope::ALL
             .into_iter()
             .filter(move |scope| self.contains(*scope))
@@ -136,7 +136,7 @@ impl Scopes {
 
     /// The scopes among `names` that are recognised; unknown names are
     /// dropped.
-    pub fn parse<S: AsRef<str>>(names: &[S]) -> Self {
+    pub(crate) fn parse<S: AsRef<str>>(names: &[S]) -> Self {
         names
             .iter()
             .filter_map(|name| Scope::parse(name.as_ref()))

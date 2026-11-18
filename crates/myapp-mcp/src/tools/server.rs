@@ -82,6 +82,54 @@ fn undeclared_argument_rejection(
     ))]))
 }
 
+impl AppTools {
+    /// Runs the checks a call to the known `tool` goes through before it runs:
+    /// permission, undeclared arguments, then destructive-tool confirmation
+    /// (after decoding the params, so a mistyped argument fails before the user
+    /// is asked). Returns the response that ends the call early, or `None` when
+    /// the tool may run.
+    fn precheck(
+        &self,
+        tool: &Tool,
+        request: &CallToolRequestParams,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<Option<CallToolResponse>, McpError> {
+        // template:begin oauth
+        if !scope::permits(context, tool, self.require_scopes) {
+            tracing::warn!(tool = %request.name, "call_tool: token lacks the write scope");
+            return Ok(Some(scope::insufficient_scope(&request.name).into()));
+        }
+        // template:end oauth
+        if let Some(rejection) = undeclared_argument_rejection(tool, request) {
+            return Ok(Some(rejection.into()));
+        }
+        if !(self.confirm_destructive
+            && confirm::requires_confirmation(tool)
+            && confirm::client_supports_confirmation(context))
+        {
+            return Ok(None);
+        }
+        if let Some(rejection) = params::params_rejection(&request.name, request.arguments.as_ref())
+        {
+            return Ok(Some(rejection.into()));
+        }
+        let Some(sealed) = request.request_state.as_deref() else {
+            return Ok(Some(confirm::confirmation_request(request)?.into()));
+        };
+        if let confirm::Verdict::Declined(reason) =
+            confirm::verify_confirmation(sealed, request, &self.consumed_confirmations)?
+        {
+            return Ok(Some(
+                CallToolResult::error(vec![ContentBlock::text(format!(
+                    "confirmation_declined: {reason}"
+                ))])
+                .into(),
+            ));
+        }
+        Ok(None)
+    }
+}
+
 impl ServerHandler for AppTools {
     fn get_info(&self) -> ServerConfig {
         let mut info = ServerConfig::default();
@@ -96,6 +144,10 @@ impl ServerHandler for AppTools {
     }
 
     /// Advertises every tool to every caller.
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "the handler builds its response only when the returned future is polled"
+    )]
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -117,49 +169,18 @@ impl ServerHandler for AppTools {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         tracing::info!(tool = %request.name, "call_tool");
-        if let Some(tool) = self.router.get(&request.name) {
-            // template:begin oauth
-            if !scope::permits(&context, tool, self.require_scopes) {
-                tracing::warn!(tool = %request.name, "call_tool: token lacks the write scope");
-                return Ok(scope::insufficient_scope(&request.name).into());
-            }
-            // template:end oauth
-            if let Some(rejection) = undeclared_argument_rejection(tool, &request) {
-                return Ok(rejection.into());
-            }
-            if self.confirm_destructive
-                && confirm::requires_confirmation(tool)
-                && confirm::client_supports_confirmation(&context)
-            {
-                if let Some(rejection) =
-                    params::params_rejection(&request.name, request.arguments.as_ref())
-                {
-                    return Ok(rejection.into());
-                }
-                match request.request_state.as_deref() {
-                    None => return Ok(confirm::confirmation_request(&request)?.into()),
-                    Some(sealed) => {
-                        if let confirm::Verdict::Declined(reason) = confirm::verify_confirmation(
-                            sealed,
-                            &request,
-                            &self.consumed_confirmations,
-                        )? {
-                            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                                "confirmation_declined: {reason}"
-                            ))])
-                            .into());
-                        }
-                    }
-                }
-            }
+        if let Some(tool) = self.router.get(&request.name)
+            && let Some(refusal) = self.precheck(tool, &request, &context)?
+        {
+            return Ok(refusal);
         }
         let tool_call_context = ToolCallContext::new(self, request, context);
-        Ok(match self.router.call(tool_call_context).await? {
-            CallToolResponse::Complete(result) => {
-                enforce_response_budget(result, self.max_response_bytes)?.into()
-            }
-            other => other,
-        })
+        let response = self.router.call(tool_call_context).await?;
+        if let CallToolResponse::Complete(result) = response {
+            Ok(enforce_response_budget(result, self.max_response_bytes)?.into())
+        } else {
+            Ok(response)
+        }
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -551,15 +572,17 @@ mod tests {
         let server = upstream().await;
         let oauth = tools_for(&server).with_require_scopes(true);
 
-        for caller in [Caller::UnrestrictedHttp, Caller::Stdio] {
-            for tool in oauth.router().list_all() {
-                let name = tool.name.as_ref();
-                let result = complete(call(&oauth, caller, name, valid_arguments(name)).await);
-                if is_read_only(&tool) {
-                    assert_succeeded(&result, &format!("{name} as {caller:?}"));
-                } else {
-                    assert_refused(&result, name);
-                }
+        let every_tool = oauth.router().list_all();
+        let calls = [Caller::UnrestrictedHttp, Caller::Stdio]
+            .into_iter()
+            .flat_map(|caller| every_tool.iter().map(move |tool| (caller, tool)));
+        for (caller, tool) in calls {
+            let name = tool.name.as_ref();
+            let result = complete(call(&oauth, caller, name, valid_arguments(name)).await);
+            if is_read_only(tool) {
+                assert_succeeded(&result, &format!("{name} as {caller:?}"));
+            } else {
+                assert_refused(&result, name);
             }
         }
         assert_eq!(request_count(&server).await, 2 * 3, "only the reads ran");
@@ -809,7 +832,7 @@ mod tests {
             context
         };
 
-        for (label, tools, context) in [
+        for (label, case_tools, context) in [
             ("url-only elicitation", tools.clone(), url_only),
             ("no elicitation", tools.clone(), no_elicitation),
             ("2025-11-25", tools.clone(), legacy),
@@ -819,8 +842,15 @@ mod tests {
                 confirmable(context(&tools, Caller::Stdio)),
             ),
         ] {
-            let result =
-                complete(call_in(&tools, "myapp_delete_item", json!({ "id": 7 }), context).await);
+            let result = complete(
+                call_in(
+                    &case_tools,
+                    "myapp_delete_item",
+                    json!({ "id": 7 }),
+                    context,
+                )
+                .await,
+            );
             assert_succeeded(&result, label);
         }
         assert_eq!(request_count(&server).await, 4);
@@ -872,7 +902,9 @@ mod tests {
             assert_eq!(*tool, fetched);
             assert!(Arc::ptr_eq(&tool.input_schema, &fetched.input_schema));
             match (&tool.output_schema, &fetched.output_schema) {
-                (Some(listed), Some(fetched)) => assert!(Arc::ptr_eq(listed, fetched)),
+                (Some(listed_schema), Some(fetched_schema)) => {
+                    assert!(Arc::ptr_eq(listed_schema, fetched_schema));
+                }
                 other => panic!("{} must advertise an output schema: {other:?}", tool.name),
             }
             assert_eq!(

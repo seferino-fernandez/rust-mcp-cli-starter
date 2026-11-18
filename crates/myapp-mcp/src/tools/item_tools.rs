@@ -16,7 +16,7 @@ use rmcp::{
 use super::error::ToolError;
 use super::handler::AppTools;
 use super::params::{CreateItemParams, ItemIdParams, ListItemsParams};
-use super::types::{DeleteResult, Items};
+use super::types::{DeleteResult, Listed};
 use myapp_core::Redacted;
 use myapp_core::models::{Item, NewItem, SystemStatus};
 
@@ -50,12 +50,12 @@ impl AppTools {
     async fn list_items(
         &self,
         Parameters(params): Parameters<ListItemsParams>,
-    ) -> Result<Json<Redacted<Items<Item>>>, ToolError> {
+    ) -> Result<Json<Redacted<Listed<Item>>>, ToolError> {
         let page = self
             .client
             .list_items(params.page, params.page_size)
             .await?;
-        Ok(Json(self.client.redact(&Items::from(page))?))
+        Ok(Json(self.client.redact(&Listed::from(page))?))
     }
 
     #[tool(

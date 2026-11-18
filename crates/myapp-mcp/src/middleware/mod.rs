@@ -8,7 +8,7 @@
 //!   through a [`SecretDigest`](crate::secret_digest::SecretDigest).
 
 // template:begin oauth
-pub mod cors;
-pub mod oauth;
+pub(crate) mod cors;
+pub(crate) mod oauth;
 // template:end oauth
-pub mod static_bearer_auth;
+pub(crate) mod static_bearer_auth;

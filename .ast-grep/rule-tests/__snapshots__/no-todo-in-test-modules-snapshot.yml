@@ -1,0 +1,56 @@
+id: no-todo-in-test-modules
+snapshots:
+  "#[cfg(test)]\n#[expect(dead_code, reason = \"helper\")]\nmod tests { fn unfinished() { std::todo!(); } }":
+    labels:
+    - source: std::todo!()
+      style: primary
+      start: 83
+      end: 95
+    - source: "#[cfg(test)]"
+      style: secondary
+      start: 0
+      end: 12
+    - source: mod tests { fn unfinished() { std::todo!(); } }
+      style: secondary
+      start: 53
+      end: 100
+    - source: std::todo
+      style: secondary
+      start: 83
+      end: 92
+  "#[cfg(test)] mod tests { fn unfinished() { todo!(); } }":
+    labels:
+    - source: todo!()
+      style: primary
+      start: 43
+      end: 50
+    - source: "#[cfg(test)]"
+      style: secondary
+      start: 0
+      end: 12
+    - source: mod tests { fn unfinished() { todo!(); } }
+      style: secondary
+      start: 13
+      end: 55
+    - source: todo
+      style: secondary
+      start: 43
+      end: 47
+  "#[cfg(test)] mod tests { mod nested { fn unfinished() { unimplemented!(); } } }":
+    labels:
+    - source: unimplemented!()
+      style: primary
+      start: 56
+      end: 72
+    - source: "#[cfg(test)]"
+      style: secondary
+      start: 0
+      end: 12
+    - source: mod tests { mod nested { fn unfinished() { unimplemented!(); } } }
+      style: secondary
+      start: 13
+      end: 79
+    - source: unimplemented
+      style: secondary
+      start: 56
+      end: 69

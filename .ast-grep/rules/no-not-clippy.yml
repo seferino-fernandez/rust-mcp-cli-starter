@@ -1,0 +1,16 @@
+id: no-not-clippy
+language: Rust
+severity: error
+message: Do not disable checks under Clippy.
+rule:
+  kind: attribute
+  regex: '^cfg(_attr)?\s*\('
+  has:
+    kind: token_tree
+    has:
+      kind: identifier
+      regex: '^clippy$'
+    follows:
+      kind: identifier
+      regex: '^not$'
+    stopBy: end

@@ -12,8 +12,8 @@ use super::url::{
     redact_url_user_info,
 };
 use super::{
-    MASKED_VALUE, is_sensitive_free_text_key, percent_decoded, percent_escape_at,
-    starts_with_ignore_ascii_case,
+    MASKED_VALUE, decode_percent_escapes, is_sensitive_free_text_key, percent_decoded,
+    percent_escape_at, starts_with_ignore_ascii_case,
 };
 
 /// Masks credentials in free text, borrowing `text` when nothing is masked.
@@ -212,24 +212,9 @@ fn holds_encoded_structure(token: &str) -> bool {
 /// Decodes every `%` escape in `text`, returning the bytes and, for each
 /// decoded byte and one past the last, where it starts in `text`.
 fn percent_decoded_with_offsets(text: &str) -> (Vec<u8>, Vec<usize>) {
-    let bytes = text.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut starts = Vec::with_capacity(bytes.len().saturating_add(1));
-    let mut index = 0;
-    while let Some(&byte) = bytes.get(index) {
-        starts.push(index);
-        match percent_escape_at(bytes, index) {
-            Some(value) => {
-                decoded.push(value);
-                index = index.saturating_add(3);
-            }
-            None => {
-                decoded.push(byte);
-                index = index.saturating_add(1);
-            }
-        }
-    }
-    starts.push(bytes.len());
+    let mut starts = Vec::with_capacity(text.len().saturating_add(1));
+    let decoded = decode_percent_escapes(text, |start| starts.push(start));
+    starts.push(text.len());
     (decoded, starts)
 }
 
@@ -770,23 +755,46 @@ fn mask_values_after_key_tokens(
     tokens: &[Range<usize>],
     masks: &mut Vec<Range<usize>>,
 ) {
-    let line_breaks = text
-        .char_indices()
-        .filter(|&(_, character)| is_line_break(character))
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
+    let mut lines = LineMasks::new(text);
     let quotes = QuoteCounts::new(text);
-    let mut line_masked_to = 0;
     for index in 0..tokens.len() {
         masks.extend(value_after_key_token(text, tokens, index, &quotes));
-        masks.extend(header_credentials(
-            text,
-            tokens,
-            index,
-            &line_breaks,
-            &mut line_masked_to,
-            &quotes,
-        ));
+        masks.extend(header_credentials(text, tokens, index, &mut lines, &quotes));
+    }
+}
+
+/// The line breaks of a text and the end of the last value masked to the
+/// end of its line, so values masked that way never overlap.
+struct LineMasks {
+    /// The position of every line break in the text, in order.
+    breaks: Vec<usize>,
+    /// The end of the last value masked to the end of its line.
+    masked_to: usize,
+}
+
+impl LineMasks {
+    /// Finds the line breaks of `text`; nothing is masked yet.
+    fn new(text: &str) -> Self {
+        let breaks = text
+            .char_indices()
+            .filter(|&(_, character)| is_line_break(character))
+            .map(|(index, _)| index)
+            .collect();
+        Self {
+            breaks,
+            masked_to: 0,
+        }
+    }
+
+    /// The range from `start` to the end of its line, as [`to_line_end`]
+    /// finds it, and moves `masked_to` to its end. `None` when `start` is
+    /// already inside a value masked this way.
+    fn rest_of_line(&mut self, text: &str, start: usize) -> Option<Range<usize>> {
+        (start >= self.masked_to).then(|| {
+            let value = to_line_end(text, &self.breaks, start);
+            self.masked_to = value.end;
+            value
+        })
     }
 }
 
@@ -817,17 +825,16 @@ fn value_after_key_token(
 ) -> Option<Range<usize>> {
     let current = text.get(tokens.get(index)?.clone())?;
     let next = tokens.get(index.saturating_add(1))?;
-    let (key, value) = match trailing_separator_start(current) {
-        Some(separator_start) => (current.get(..separator_start)?, next.clone()),
-        None => {
-            let (_, separator_len) = leading_separator(text.get(next.clone())?)?;
-            let value = if separator_len == next.len() {
-                tokens.get(index.saturating_add(2))?.clone()
-            } else {
-                next.start.saturating_add(separator_len)..next.end
-            };
-            (current, value)
-        }
+    let (key, value) = if let Some(separator_start) = trailing_separator_start(current) {
+        (current.get(..separator_start)?, next.clone())
+    } else {
+        let (_, separator_len) = leading_separator(text.get(next.clone())?)?;
+        let value = if separator_len == next.len() {
+            tokens.get(index.saturating_add(2))?.clone()
+        } else {
+            next.start.saturating_add(separator_len)..next.end
+        };
+        (current, value)
     };
     let key = strip_closing_quote(key);
     let key_start = trailing_key_start(key);
@@ -991,15 +998,14 @@ fn credential_header(name: &str) -> Option<CredentialHeader> {
 /// such as `?authorization=Bearer` is left to the pair rules unless another
 /// token follows it on the same line, as in `?authorization=Bearer tok`.
 ///
-/// A value masked to the end of its line moves `line_masked_to` to its end,
-/// and a later one that would start before it is already inside it and is
+/// A value masked to the end of its line moves `lines` past its end, and a
+/// later one that would start before it is already inside it and is
 /// skipped, so those values never overlap and the work stays linear.
 fn header_credentials(
     text: &str,
     tokens: &[Range<usize>],
     index: usize,
-    line_breaks: &[usize],
-    line_masked_to: &mut usize,
+    lines: &mut LineMasks,
     quotes: &QuoteCounts,
 ) -> Vec<Range<usize>> {
     let Some(HeaderWord {
@@ -1028,27 +1034,20 @@ fn header_credentials(
         && word_text
             .chars()
             .all(|character| character.is_ascii_alphabetic());
-    let mut rest_of_line = |start: usize| {
-        (start >= *line_masked_to).then(|| {
-            let value = to_line_end(text, line_breaks, start);
-            *line_masked_to = value.end;
-            value
-        })
-    };
     let mut credentials = Vec::new();
     match header {
-        CredentialHeader::Cookie => credentials.extend(rest_of_line(word.start)),
+        CredentialHeader::Cookie => credentials.extend(lines.rest_of_line(text, word.start)),
         CredentialHeader::Authorization if scheme => {
             if let Some(follow) = follow {
                 if word_text.eq_ignore_ascii_case("Bearer") {
                     credentials.push(follow);
                 } else {
-                    credentials.extend(rest_of_line(follow.start));
+                    credentials.extend(lines.rest_of_line(text, follow.start));
                 }
             }
         }
         CredentialHeader::Authorization => {
-            credentials.extend(rest_of_line(word.start));
+            credentials.extend(lines.rest_of_line(text, word.start));
             if !follows_on_the_same_line {
                 credentials.extend(follow);
             }
@@ -1085,7 +1084,7 @@ fn to_line_end(text: &str, line_breaks: &[usize], start: usize) -> Range<usize> 
             break line_break;
         }
         let next_line_start = text.len().saturating_sub(next_line.len());
-        next_break = line_breaks.partition_point(|&line_break| line_break < next_line_start);
+        next_break = line_breaks.partition_point(|&position| position < next_line_start);
     };
     let kept = text.get(start..end).map_or(0, |line| line.trim_end().len());
     start..start.saturating_add(kept)
@@ -1118,26 +1117,23 @@ fn header_word<'text>(
         ))
     });
     let (header, name_start, separator, separator_len, separator_token, query) =
-        match named_separator {
-            Some((header, name_start, separator, separator_len, query)) => {
-                (header, name_start, separator, separator_len, index, query)
-            }
-            None => {
-                let name = strip_closing_quote(current);
-                let name_start = trailing_key_start(name);
-                let header = credential_header(name.get(name_start..)?)?;
-                let next_index = index.saturating_add(1);
-                let next = tokens.get(next_index)?;
-                let (_, separator_len) = leading_separator(text.get(next.clone())?)?;
-                (
-                    header,
-                    name_start,
-                    next.start,
-                    separator_len,
-                    next_index,
-                    false,
-                )
-            }
+        if let Some((header, name_start, separator, separator_len, query)) = named_separator {
+            (header, name_start, separator, separator_len, index, query)
+        } else {
+            let name = strip_closing_quote(current);
+            let name_start = trailing_key_start(name);
+            let header = credential_header(name.get(name_start..)?)?;
+            let next_index = index.saturating_add(1);
+            let next = tokens.get(next_index)?;
+            let (_, separator_len) = leading_separator(text.get(next.clone())?)?;
+            (
+                header,
+                name_start,
+                next.start,
+                separator_len,
+                next_index,
+                false,
+            )
         };
     let separator_end = tokens.get(separator_token)?.end;
     let word_start = separator.saturating_add(separator_len);

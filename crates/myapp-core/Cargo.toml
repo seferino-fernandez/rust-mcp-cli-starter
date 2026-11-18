@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 rust-version.workspace = true
 description = "Async Rust client library for the MYAPP API"
 readme = "README.md"
@@ -19,6 +18,9 @@ all-features = true
 # can advertise tool output schemas. Off by default to keep the core client free
 # of the schemars dependency.
 schema = ["dep:schemars"]
+# Shared `completions` and `man` subcommand implementations for the binaries
+# (the `cli` module). Off by default so library users don't pull in clap.
+cli = ["dep:clap", "dep:clap_complete", "dep:clap_complete_nushell", "dep:clap_mangen"]
 
 [dependencies]
 reqwest.workspace = true
@@ -31,14 +33,21 @@ tracing.workspace = true
 toml.workspace = true
 url.workspace = true
 schemars = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+clap_complete = { workspace = true, optional = true }
+clap_complete_nushell = { workspace = true, optional = true }
+clap_mangen = { workspace = true, optional = true }
 
 [dev-dependencies]
 wiremock.workspace = true
-tokio = { workspace = true, features = [
+tokio = {
+  workspace = true,
+  features = [
     "test-util",
     "macros",
     "rt-multi-thread",
-] }
+  ]
+}
 tempfile.workspace = true
 
 [lints]

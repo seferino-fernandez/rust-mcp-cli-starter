@@ -1,0 +1,6 @@
+id: ignore-requires-reason
+valid:
+  - "#[test]\n#[ignore = \"needs a running API\"]\nfn live() {}"
+  - "fn active() {}"
+invalid:
+  - "#[test]\n#[ignore]\nfn live() {}"

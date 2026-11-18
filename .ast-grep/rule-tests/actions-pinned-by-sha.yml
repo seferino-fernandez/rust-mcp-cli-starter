@@ -1,0 +1,124 @@
+id: actions-pinned-by-sha
+valid:
+  - |-
+      uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2
+  - |-
+      uses: "taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b" # v2
+  - |-
+      uses: 'taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b' # v2
+  - |-
+      - {uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b}
+  - |-
+      run: echo taiki-e/install-action@v2
+  - |-
+      jobs:
+        reusable:
+          uses: example/workflows/.github/workflows/build.yml@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      "uses": taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      'uses': taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      &a uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      !!str uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      &a !!str "uses": taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      !!str &a 'uses': taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      !<tag:yaml.org,2002:str> uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      !x uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      - ? uses
+        : taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      - ?
+          uses
+        : taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+invalid:
+  - |-
+      uses: taiki-e/install-action@v2
+  - |-
+      - {uses: taiki-e/install-action@v2}
+  - |-
+      "uses": taiki-e/install-action@v2
+  - |-
+      'uses': taiki-e/install-action@v2
+  - |-
+      uses: >-
+        taiki-e/install-action@v2
+  - |-
+      uses: |
+        taiki-e/install-action@v2
+  - |-
+      uses: "taiki-e/install-action@v2"
+  - |-
+      uses: 'taiki-e/install-action@v2'
+  - |-
+      uses: taiki-e/install-action@cargo-nextest
+  - |-
+      uses: taiki-e/install-action@1919c4a
+  - |-
+      uses: taiki-e/install-action@1919C4A95903D2C33E4A221102EDCA87309FC14B
+  - |-
+      uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14
+  - |-
+      uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14ba
+  - |-
+      uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b-x
+  - |-
+      uses: taiki-e/install-action
+  - |-
+      uses: >-
+        taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      uses: |
+        taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      &a uses: taiki-e/install-action@v2
+  - |-
+      !!str uses: taiki-e/install-action@v2
+  - |-
+      &a !!str uses: taiki-e/install-action@v2
+  - |-
+      !!str &a uses: taiki-e/install-action@v2
+  - |-
+      "\x75ses": taiki-e/install-action@v2
+  - |-
+      "\u0075ses": taiki-e/install-action@v2
+  - |-
+      "\x75ses": taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      !!str &a "uses": taiki-e/install-action@v2
+  - |-
+      &a !!str 'uses': taiki-e/install-action@v2
+  - |-
+      !<tag:yaml.org,2002:str> uses: taiki-e/install-action@v2
+  - |-
+      !x uses: taiki-e/install-action@v2
+  - |-
+      "na\u006de": build
+  - |-
+      - {"na\u006de": build}
+  - |-
+      - ? |-
+          uses
+        : taiki-e/install-action@v2
+  - |-
+      - ? >-
+          uses
+        : taiki-e/install-action@v2
+  - |-
+      - ? &a |-
+          uses
+        : taiki-e/install-action@v2
+  - |-
+      - ? |-
+          uses
+        : taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b
+  - |-
+      - ? |-
+          name
+        : build

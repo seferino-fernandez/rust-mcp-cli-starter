@@ -14,6 +14,7 @@ It powers the `myapp-cli` terminal app and the `myapp-mcp` Model Context Protoco
 - Redirects are never followed, so the API key is never sent on to another host; a 3xx response is `Error::Redirected`. Upstream error bodies are redacted and capped at 8 KiB, and transport errors have the secrets in their URL masked.
 - Output redaction as a type: `Redacted<T>` (built by `Redacted::new` or `ApiClient::redact`) masks the forms listed under [Redaction](#redaction), in time linear in the text, and keeps `T`'s JSON schema.
 - A generic pagination envelope (`Page<T>`) and example endpoint methods you replace with your own.
+- Optional Cargo features: `schema` derives `schemars::JsonSchema` on the API models, and `cli` adds the `cli` module the binaries share for their `completions` and `man` subcommands.
 
 ## Redaction
 

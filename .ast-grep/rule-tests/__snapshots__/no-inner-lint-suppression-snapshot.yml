@@ -1,0 +1,22 @@
+id: no-inner-lint-suppression
+snapshots:
+  "#![allow(dead_code)]\nfn helper() {}":
+    labels:
+    - source: "#![allow(dead_code)]"
+      style: primary
+      start: 0
+      end: 20
+    - source: allow(dead_code)
+      style: secondary
+      start: 3
+      end: 19
+  "#![expect(dead_code, reason = \"helper\")]\nfn helper() {}":
+    labels:
+    - source: "#![expect(dead_code, reason = \"helper\")]"
+      style: primary
+      start: 0
+      end: 40
+    - source: expect(dead_code, reason = "helper")
+      style: secondary
+      start: 3
+      end: 39

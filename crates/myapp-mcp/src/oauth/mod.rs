@@ -13,11 +13,11 @@
 //!   refresh tokens, pending authorizations, and registered clients with
 //!   periodic eviction.
 
-pub mod endpoints;
-pub mod limiter;
-pub mod model;
-pub mod pkce;
-pub mod store;
+pub(crate) mod endpoints;
+pub(crate) mod limiter;
+pub(crate) mod model;
+pub(crate) mod pkce;
+pub(crate) mod store;
 
 #[cfg(test)]
 mod tests;

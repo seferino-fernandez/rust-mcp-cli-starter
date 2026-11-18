@@ -19,3 +19,9 @@ updates:
           dependencies:
               patterns:
                   - "*"
+
+    # Bumps the pinned channel in rust-toolchain.toml.
+    - package-ecosystem: "rust-toolchain"
+      directory: "/"
+      schedule:
+          interval: "weekly"

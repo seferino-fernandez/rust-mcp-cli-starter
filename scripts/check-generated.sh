@@ -32,9 +32,16 @@ reject_matches() {
 }
 
 if [[ "$phase" == source ]]; then
-    absent pre-script.rhai cargo-generate.toml README.generated.md \
+    absent pre-script.rhai cargo-generate.toml README.generated.md AGENTS.generated.md \
         .github/workflows/template.yml scripts/check-generated.sh
     test -f Cargo.lock
+    for file in AGENTS.md CLAUDE.md docs/quality-guardrails.md deny.toml tombi.toml _typos.toml \
+        sgconfig.yml .ast-grep/rules/actions-pinned-by-sha.yml .cargo/mutants.toml \
+        .pre-commit-config.yaml rust-toolchain.toml; do
+        test -f "$file" || { echo "Missing guardrail file in $profile project: $file" >&2; exit 1; }
+    done
+    grep -q '^## Quality gates' AGENTS.md
+    reject_matches 'cargo-generate|template:' AGENTS.md CLAUDE.md docs tombi.toml
     reject_matches 'template:(begin|end)' crates Cargo.toml README.md config.toml.example justfile
     if [[ "$profile" == stdio ]]; then
         absent "$mcp_dir/src/http.rs" "$mcp_dir/src/middleware" \

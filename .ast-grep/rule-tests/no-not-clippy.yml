@@ -1,0 +1,8 @@
+id: no-not-clippy
+valid:
+  - "#[cfg(test)] fn example() {}"
+  - "#[cfg_attr(test, expect(dead_code, reason = \"test helper\"))] fn example() {}"
+invalid:
+  - "#[cfg(not(clippy))] fn example() {}"
+  - "#[cfg_attr(not(clippy), allow(dead_code))] fn example() {}"
+  - "#[cfg(all(unix, not(clippy)))] fn example() {}"

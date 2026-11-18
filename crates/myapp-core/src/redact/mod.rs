@@ -253,8 +253,8 @@ pub(crate) fn is_sensitive_free_text_key(key: &str) -> bool {
 
 /// [`is_sensitive_free_text_key`], also matching [`COUNTED_KEY`] followed by
 /// `s` when `counted_plural` is set.
-fn is_sensitive_key_name(key: &str, counted_plural: bool) -> bool {
-    let decoded = percent_decoded(key);
+fn is_sensitive_key_name(raw_key: &str, counted_plural: bool) -> bool {
+    let decoded = percent_decoded(raw_key);
     let key = decoded.as_ref();
     let name = key
         .get(..2)
@@ -327,22 +327,27 @@ fn percent_decoded(text: &str) -> Cow<'_, str> {
     if !text.contains('%') {
         return Cow::Borrowed(text);
     }
+    let decoded = decode_percent_escapes(text, |_| {});
+    Cow::Owned(String::from_utf8_lossy(&decoded).into_owned())
+}
+
+/// Decodes every `%` followed by two hex digits in `text`, calling `on_start`
+/// with where each decoded byte starts in `text`.
+fn decode_percent_escapes(text: &str, mut on_start: impl FnMut(usize)) -> Vec<u8> {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while let Some(&byte) = bytes.get(index) {
-        match percent_escape_at(bytes, index) {
-            Some(value) => {
-                decoded.push(value);
-                index = index.saturating_add(3);
-            }
-            None => {
-                decoded.push(byte);
-                index = index.saturating_add(1);
-            }
+        on_start(index);
+        if let Some(value) = percent_escape_at(bytes, index) {
+            decoded.push(value);
+            index = index.saturating_add(3);
+        } else {
+            decoded.push(byte);
+            index = index.saturating_add(1);
         }
     }
-    Cow::Owned(String::from_utf8_lossy(&decoded).into_owned())
+    decoded
 }
 
 /// The byte a `%` and two hex digits at `index` of `bytes` encode, if they
@@ -365,6 +370,7 @@ fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
+    use std::fmt::Write as _;
     use std::time::{Duration, Instant};
 
     use serde::Serialize;
@@ -850,7 +856,6 @@ mod tests {
             ("I3: 64 KiB of @ paths without a colon", at_paths),
         ] {
             let elapsed = time_free_text_rules(&input);
-            eprintln!("{name}: {} bytes in {elapsed:?}", input.len());
             assert!(
                 elapsed < Duration::from_millis(500),
                 "{name} took {elapsed:?}"
@@ -905,7 +910,6 @@ mod tests {
             let start = Instant::now();
             let redacted = redact_text(&input);
             let elapsed = start.elapsed();
-            eprintln!("{name}: {} bytes in {elapsed:?}", input.len());
             assert!(matches!(redacted, Cow::Owned(_)), "{name} is masked");
             assert!(
                 elapsed < Duration::from_millis(500),
@@ -942,11 +946,6 @@ mod tests {
             let large = unit.repeat(16_384);
             let small_time = fastest_redaction(&small);
             let large_time = fastest_redaction(&large);
-            eprintln!(
-                "{name}: {} bytes in {small_time:?}, {} bytes in {large_time:?}",
-                small.len(),
-                large.len()
-            );
             assert!(
                 large_time < small_time.saturating_mul(16),
                 "{name}: 8x input took {large_time:?} against {small_time:?}"
@@ -962,9 +961,11 @@ mod tests {
                     "http://myapp:8080/1/download?apikey=k&link={}&file=Some.Show.S01E{release:02}",
                     "A".repeat(600)
                 );
-                let trackers = (1..=15)
-                    .map(|tracker| format!("&tr=http://tracker{tracker}.example:80/announce"))
-                    .collect::<String>();
+                let trackers = (1..=15).fold(String::new(), |mut trackers, tracker| {
+                    write!(trackers, "&tr=http://tracker{tracker}.example:80/announce")
+                        .expect("writing to a String cannot fail");
+                    trackers
+                });
                 serde_json::json!({
                     "title": format!("Some.Show.S01E{release:02}.1080p.WEB-DL.x264-GROUP"),
                     "guid": download,
@@ -979,11 +980,6 @@ mod tests {
         let start = Instant::now();
         let redacted = Redacted::new(&releases).expect("redaction succeeds");
         let elapsed = start.elapsed();
-
-        eprintln!(
-            "search result: {} bytes in {elapsed:?}",
-            releases.to_string().len()
-        );
         assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
         let redacted = redacted.as_value().to_string();
         assert_eq!(redacted.matches("apikey=********").count(), 200);

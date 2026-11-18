@@ -7,7 +7,7 @@ use crate::auth::Transport;
 // template:begin http
 use crate::auth::AuthMode;
 // template:end http
-use crate::commands::completions::CompletionShell;
+use myapp_core::cli::CompletionShell;
 
 use crate::config::{ServerConfig, ServerOverrides};
 use myapp_core::{ConfigOverrides, SecretString};
@@ -19,7 +19,7 @@ use myapp_core::{ConfigOverrides, SecretString};
     about = "MCP server exposing the MYAPP API",
     version
 )]
-pub struct Args {
+pub(crate) struct Args {
     /// Optional subcommand. When omitted, the MCP server runs.
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -107,7 +107,7 @@ pub struct Args {
 
 /// Subcommands for the MCP server binary.
 #[derive(Subcommand)]
-pub enum Command {
+pub(crate) enum Command {
     /// Generate a shell completion script (bash, elvish, fish, nushell,
     /// powershell, zsh).
     Completions {
@@ -127,7 +127,7 @@ pub enum Command {
 
 impl Args {
     /// Returns the CLI flags as the loader's top layer.
-    pub fn overrides(&self) -> ServerOverrides {
+    pub(crate) fn overrides(&self) -> ServerOverrides {
         let secret = |value: &Option<String>| value.clone().map(SecretString::from);
         ServerOverrides {
             core: ConfigOverrides {
@@ -153,7 +153,7 @@ impl Args {
 // template:begin oauth
 /// Resolves the external base URL for OAuth metadata, warning on plain HTTP
 /// over a non-loopback address.
-pub fn resolve_base_url(config: &ServerConfig, addr: &std::net::SocketAddr) -> String {
+pub(crate) fn resolve_base_url(config: &ServerConfig, addr: &std::net::SocketAddr) -> String {
     let base_url = config
         .mcp
         .base_url
@@ -167,7 +167,7 @@ pub fn resolve_base_url(config: &ServerConfig, addr: &std::net::SocketAddr) -> S
 
 // template:end oauth
 /// Builds an authenticated [`ApiClient`](myapp_core::ApiClient) from config (eager; no login flow).
-pub fn create_api_client(config: &ServerConfig) -> anyhow::Result<myapp_core::ApiClient> {
+pub(crate) fn create_api_client(config: &ServerConfig) -> anyhow::Result<myapp_core::ApiClient> {
     Ok(myapp_core::ApiClient::new(config.core.clone())?)
 }
 
@@ -177,11 +177,11 @@ mod tests {
 
     #[test]
     fn transport_defaults_to_stdio_and_rejects_unknown_names() {
-        let args = Args::try_parse_from(["myapp-mcp"]).unwrap();
-        assert_eq!(args.transport, Transport::Stdio);
+        let default_args = Args::try_parse_from(["myapp-mcp"]).unwrap();
+        assert_eq!(default_args.transport, Transport::Stdio);
         // template:begin http
-        let args = Args::try_parse_from(["myapp-mcp", "--transport", "http"]).unwrap();
-        assert_eq!(args.transport, Transport::Http);
+        let http_args = Args::try_parse_from(["myapp-mcp", "--transport", "http"]).unwrap();
+        assert_eq!(http_args.transport, Transport::Http);
         // template:end http
         let parsed = Args::try_parse_from(["myapp-mcp", "--transport", "sse"]);
         assert_eq!(

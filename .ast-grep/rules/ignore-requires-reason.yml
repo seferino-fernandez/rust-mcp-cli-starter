@@ -1,0 +1,9 @@
+id: ignore-requires-reason
+language: Rust
+severity: error
+message: Ignored tests must carry a reason string.
+rule:
+  kind: attribute_item
+  has:
+    kind: attribute
+    regex: '^ignore$'

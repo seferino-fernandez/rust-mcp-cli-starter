@@ -1,0 +1,56 @@
+id: no-not-clippy
+snapshots:
+  "#[cfg(all(unix, not(clippy)))] fn example() {}":
+    labels:
+    - source: cfg(all(unix, not(clippy)))
+      style: primary
+      start: 2
+      end: 29
+    - source: clippy
+      style: secondary
+      start: 20
+      end: 26
+    - source: not
+      style: secondary
+      start: 16
+      end: 19
+    - source: (clippy)
+      style: secondary
+      start: 19
+      end: 27
+  "#[cfg(not(clippy))] fn example() {}":
+    labels:
+    - source: cfg(not(clippy))
+      style: primary
+      start: 2
+      end: 18
+    - source: clippy
+      style: secondary
+      start: 10
+      end: 16
+    - source: not
+      style: secondary
+      start: 6
+      end: 9
+    - source: (clippy)
+      style: secondary
+      start: 9
+      end: 17
+  "#[cfg_attr(not(clippy), allow(dead_code))] fn example() {}":
+    labels:
+    - source: cfg_attr(not(clippy), allow(dead_code))
+      style: primary
+      start: 2
+      end: 41
+    - source: clippy
+      style: secondary
+      start: 15
+      end: 21
+    - source: not
+      style: secondary
+      start: 11
+      end: 14
+    - source: (clippy)
+      style: secondary
+      start: 14
+      end: 22

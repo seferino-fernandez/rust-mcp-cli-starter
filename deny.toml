@@ -1,0 +1,35 @@
+# cargo-deny policy: `cargo deny check`.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+# RustSec advisories. Vulnerable, unsound and yanked crates fail anywhere in
+# the tree. Unmaintained crates fail only as direct dependencies: a transitive
+# one (for example chrono through rmcp and schemars) is the upstream crate's
+# to replace, and an ignore list would hide it instead of scoping it.
+[advisories]
+unmaintained = "workspace"
+
+# Exactly the licenses the current dependency tree needs. A new dependency
+# under any other license fails until someone deliberately adds it here.
+[licenses]
+allow = [
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+]
+
+[bans]
+multiple-versions = "warn"
+
+# Crates may only come from crates.io.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

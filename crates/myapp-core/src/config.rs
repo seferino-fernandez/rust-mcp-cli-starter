@@ -49,7 +49,7 @@ impl LogConfig {
     /// separately and still overrides the result.
     ///
     /// An explicit `-v`/`-q` level (`flag`) wins over the configured
-    /// [`level`](Self::level), which wins over `default`. An unparseable
+    /// [`level`](Self::level), which wins over `default`. An unparsable
     /// configured level falls back to `default` and also returns a warning for
     /// the caller to print, since logging is not set up yet.
     ///
@@ -461,14 +461,17 @@ fn toml_parse_error(path: PathBuf, text: &str, error: &toml::de::Error) -> Confi
 /// span.
 #[cfg(test)]
 fn describe_toml_error(text: &str, error: &toml::de::Error) -> String {
-    match toml_parse_error(PathBuf::new(), text, error) {
-        ConfigError::Parse {
-            line,
-            column,
-            message,
-            ..
-        } => crate::error::Located::new(line, column, &message).to_string(),
-        other => other.to_string(),
+    let config_error = toml_parse_error(PathBuf::new(), text, error);
+    if let ConfigError::Parse {
+        line,
+        column,
+        message,
+        ..
+    } = &config_error
+    {
+        crate::error::Located::new(*line, *column, message).to_string()
+    } else {
+        config_error.to_string()
     }
 }
 

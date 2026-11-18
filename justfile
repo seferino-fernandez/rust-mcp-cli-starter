@@ -1,13 +1,34 @@
 default:
     @just --list
 
-# Full gate: formatting, lints, locked check, the whole test matrix, and the docs build (mirrors CI)
+# Full gate: everything CI checks except the PR-only duplicate check (`just dupes`)
 verify:
+	just hygiene
 	cargo fmt --all --check
-	cargo clippy --all-targets --all-features -- -D warnings
-	cargo check --locked
+	cargo check --locked --workspace
+	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 	just test
 	just doc
+	cargo deny check
+	cargo shear
+
+# Spelling, TOML formatting and lint, and the ast-grep rules with their tests
+hygiene:
+	typos
+	tombi format --check
+	tombi lint --error-on-warnings
+	ast-grep scan
+	ast-grep test
+
+# Mutation-test only the code changed since main; any surviving mutant fails
+mutants-diff:
+	mkdir -p target
+	git diff --no-ext-diff --no-color --src-prefix=a/ --dst-prefix=b/ "$(git merge-base main HEAD)" > target/mutants.diff
+	cargo mutants --in-diff target/mutants.diff
+
+# Fail on code clones introduced since origin/main (needs Node.js)
+dupes:
+	npx --yes jscpd@5.4.3 --baseline-from-ref origin/main --fail-on-new-clones=0 crates
 
 # Run all tests: full feature matrix, default features, and doctests
 test:
@@ -24,9 +45,9 @@ doc:
 integration:
 	cargo test --test endpoints -p myapp-core -- --ignored --nocapture
 
-# Lint the code with Clippy
+# Lint the code with Clippy, failing on any warning
 lint:
-    cargo clippy
+    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 # Format code with rustfmt and apply Clippy's auto-fixable suggestions
 format:

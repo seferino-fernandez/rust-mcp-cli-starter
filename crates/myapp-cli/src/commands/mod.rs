@@ -1,6 +1,4 @@
 //! CLI command modules and shared client construction.
 
-pub mod completions;
-pub mod item;
-pub mod man;
-pub mod status;
+pub(crate) mod item;
+pub(crate) mod status;

@@ -1,8 +1,6 @@
 //! `myapp`: terminal CLI for the MYAPP API.
 
 #![doc = include_str!("../README.md")]
-#![warn(missing_docs)]
-#![forbid(unsafe_code)]
 
 mod commands;
 mod output;
@@ -11,12 +9,15 @@ mod utils;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::CompleteEnv;
 use clap_verbosity_flag::Verbosity;
-use output::OutputFormat;
+use output::{OutputFormat, StdoutClosed};
+use std::io::Write as _;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use tracing_subscriber::filter::LevelFilter;
 
-use crate::commands::{completions, item, man, status};
+use crate::commands::{item, status};
 use crate::utils::client;
+use myapp_core::cli::{self, CompletionShell};
 
 /// Applies when neither `-v`/`-q`, `MYAPP_LOG_LEVEL` nor `[log] level` sets one.
 const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::ERROR;
@@ -77,7 +78,7 @@ enum Command {
     /// powershell, zsh).
     Completions {
         /// Shell to generate the completion script for.
-        shell: completions::CompletionShell,
+        shell: CompletionShell,
     },
     #[expect(
         clippy::doc_markdown,
@@ -91,15 +92,29 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     // Dynamic completions: `COMPLETE=<shell> myapp`. A no-op for normal runs; exits
     // the process when handling a completion request, so it must precede any stdout use.
     CompleteEnv::with_factory(Cli::command).complete();
 
-    if let Err(error) = try_main().await {
-        eprintln!("myapp: {error:#}");
-        std::process::exit(1);
+    match try_main().await {
+        Ok(()) => ExitCode::SUCCESS,
+        // A closed stdout pipe (`... | head`) means the reader is done, not a failure.
+        Err(error) if error.is::<StdoutClosed>() => ExitCode::SUCCESS,
+        Err(error) => {
+            report_fatal_error(&error);
+            ExitCode::FAILURE
+        }
     }
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "the CLI's single fatal-error report: once main is reached there is no caller left \
+              to propagate a failed stderr write to"
+)]
+fn report_fatal_error(error: &anyhow::Error) {
+    eprintln!("myapp: {error:#}");
 }
 
 async fn try_main() -> anyhow::Result<()> {
@@ -107,13 +122,13 @@ async fn try_main() -> anyhow::Result<()> {
 
     // Static completion scripts need no config or API client, so emit and return early.
     if let Command::Completions { shell } = &cli.command {
-        completions::run(*shell, Cli::command());
+        cli::write_completions(*shell, Cli::command());
         return Ok(());
     }
 
     // Man pages need no config or API client, so emit and return early.
     if let Command::Man { out_dir } = &cli.command {
-        man::run(Cli::command(), out_dir)?;
+        cli::write_man_pages(Cli::command(), out_dir)?;
         return Ok(());
     }
 
@@ -132,7 +147,7 @@ async fn try_main() -> anyhow::Result<()> {
         .then(|| cli.verbosity.tracing_level_filter());
     let (level, warning) = config.log.resolve_level(flag, DEFAULT_LOG_LEVEL);
     if let Some(warning) = warning {
-        eprintln!("myapp: warning: {warning}");
+        writeln!(std::io::stderr().lock(), "myapp: warning: {warning}")?;
     }
     tracing_subscriber::fmt()
         .with_env_filter(

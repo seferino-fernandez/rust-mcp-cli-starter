@@ -1,0 +1,5 @@
+# typos: source spell checker (`typos`). Docs: https://github.com/crate-ci/typos
+
+[default.extend-words]
+# Deliberate misspelling in the env-parsing doctest (an invalid boolean).
+flase = "flase"
