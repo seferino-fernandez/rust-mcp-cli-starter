@@ -1,0 +1,32 @@
+id: no-todo-in-integration-tests
+snapshots:
+  "#[test] fn unfinished() { todo!(); }":
+    labels:
+    - source: todo!()
+      style: primary
+      start: 26
+      end: 33
+    - source: todo
+      style: secondary
+      start: 26
+      end: 30
+  "fn helper() { std::todo!(); }":
+    labels:
+    - source: std::todo!()
+      style: primary
+      start: 14
+      end: 26
+    - source: std::todo
+      style: secondary
+      start: 14
+      end: 23
+  "fn helper() { unimplemented!(\"pending\"); }":
+    labels:
+    - source: unimplemented!("pending")
+      style: primary
+      start: 14
+      end: 39
+    - source: unimplemented
+      style: secondary
+      start: 14
+      end: 27

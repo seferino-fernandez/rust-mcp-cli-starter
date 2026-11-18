@@ -1,0 +1,21 @@
+id: no-todo-in-test-modules
+language: Rust
+severity: error
+message: Test modules must not contain placeholder macros.
+rule:
+  kind: macro_invocation
+  has:
+    field: macro
+    regex: '(^|::)(todo|unimplemented)$'
+  inside:
+    kind: mod_item
+    follows:
+      kind: attribute_item
+      pattern: '#[cfg(test)]'
+      stopBy:
+        not:
+          any:
+            - kind: attribute_item
+            - kind: line_comment
+            - kind: block_comment
+    stopBy: end

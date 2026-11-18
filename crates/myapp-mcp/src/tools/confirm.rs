@@ -280,13 +280,11 @@ mod tests {
     use super::*;
 
     fn request(name: &'static str, arguments: Value, response: Value) -> CallToolRequestParams {
+        let Value::Object(arguments) = arguments else {
+            panic!("arguments are an object");
+        };
         CallToolRequestParams::new(name)
-            .with_arguments(
-                arguments
-                    .as_object()
-                    .expect("arguments are an object")
-                    .clone(),
-            )
+            .with_arguments(arguments)
             .with_input_responses(BTreeMap::from([(CONFIRM_KEY.to_string(), response)]))
     }
 

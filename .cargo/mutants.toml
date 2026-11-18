@@ -1,0 +1,3 @@
+test_tool = "nextest"
+profile = "mutants"
+additional_cargo_args = ["--all-features"]

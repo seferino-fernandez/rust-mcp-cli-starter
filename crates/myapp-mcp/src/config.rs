@@ -69,7 +69,7 @@ const DEFAULT_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 fn default_allowed_hosts() -> Vec<String> {
     DEFAULT_ALLOWED_HOSTS
         .iter()
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect()
 }
 
@@ -78,7 +78,7 @@ fn default_allowed_hosts() -> Vec<String> {
 /// CORS configuration for the MCP OAuth routes.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct OAuthCorsConfig {
+pub(crate) struct OAuthCorsConfig {
     /// Allowed origins for CORS preflight and simple requests.
     ///
     /// Use `["*"]` to allow all origins. Defaults to localhost variants.
@@ -101,7 +101,7 @@ impl Default for OAuthCorsConfig {
 /// MCP-server-specific settings.
 #[derive(Clone, Deserialize)]
 #[serde(default)]
-pub struct McpConfig {
+pub(crate) struct McpConfig {
     // template:begin http
     /// Bind address for the HTTP transport: an IPv4 or IPv6 address literal
     /// (`127.0.0.1`, `::1`, `[::1]`, `fe80::1%2`). Hostnames are not resolved.
@@ -224,9 +224,11 @@ impl Debug for McpConfig {
             .field("base_url", &self.base_url)
             // template:end oauth
             .field("token", &self.token.as_ref().map(|_| MASKED_VALUE))
+            .field("token_file", &self.token_file)
             .field("auth_mode", &self.auth_mode)
             // template:begin oauth
             .field("oauth_pin", &self.oauth_pin.as_ref().map(|_| MASKED_VALUE))
+            .field("oauth_pin_file", &self.oauth_pin_file)
             .field("oauth_token_expiry_secs", &self.oauth_token_expiry_secs)
             .field("oauth_auth_code_ttl_secs", &self.oauth_auth_code_ttl_secs)
             .field("oauth_csrf_nonce_ttl_secs", &self.oauth_csrf_nonce_ttl_secs)
@@ -246,7 +248,7 @@ impl Debug for McpConfig {
 
 /// Full server configuration.
 #[derive(Debug, Clone, Default)]
-pub struct ServerConfig {
+pub(crate) struct ServerConfig {
     /// Upstream API client config.
     pub core: Config,
     /// MCP server settings.
@@ -258,7 +260,7 @@ pub struct ServerConfig {
 /// Each `Some` beats the matching env var, env `*_FILE` var and TOML setting.
 /// A winning secret is used verbatim, even when empty.
 #[derive(Debug, Default)]
-pub struct ServerOverrides {
+pub(crate) struct ServerOverrides {
     /// Core client overrides (`--base-url`, `--api-key`).
     pub core: ConfigOverrides,
     // template:begin http
@@ -304,7 +306,7 @@ impl ServerConfig {
     // template:end http
     /// Reads environment variables from the real process environment via
     /// [`SystemEnv`]. For test injection, see [`ServerConfig::load_with_env`].
-    pub fn load(
+    pub(crate) fn load(
         path: Option<&Path>,
         overrides: &ServerOverrides,
         transport: Transport,
@@ -313,7 +315,7 @@ impl ServerConfig {
     }
 
     /// Like [`ServerConfig::load`], but reads env vars from the given [`Env`].
-    pub fn load_with_env(
+    pub(crate) fn load_with_env(
         path: Option<&Path>,
         overrides: &ServerOverrides,
         env: &impl Env,
@@ -465,9 +467,11 @@ fn resolve_mcp_secrets(
         overrides.token.clone(),
         toml_token,
         env,
-        ENV_MCP_TOKEN,
-        ENV_MCP_TOKEN_FILE,
-        "token",
+        &SecretSource {
+            env_var: ENV_MCP_TOKEN,
+            env_file_var: ENV_MCP_TOKEN_FILE,
+            field: "token",
+        },
     )?;
     // template:begin oauth
     let toml_pin = (mcp.oauth_pin.take(), mcp.oauth_pin_file.take());
@@ -475,14 +479,26 @@ fn resolve_mcp_secrets(
         overrides.oauth_pin.clone(),
         toml_pin,
         env,
-        // template:begin oauth
-        ENV_MCP_OAUTH_PIN,
-        ENV_MCP_OAUTH_PIN_FILE,
-        // template:end oauth
-        "oauth_pin",
+        &SecretSource {
+            // template:begin oauth
+            env_var: ENV_MCP_OAUTH_PIN,
+            env_file_var: ENV_MCP_OAUTH_PIN_FILE,
+            // template:end oauth
+            field: "oauth_pin",
+        },
     )?;
     // template:end oauth
     Ok(())
+}
+
+/// Names one secret's env layer and its TOML field.
+struct SecretSource {
+    /// Env var holding the secret inline.
+    env_var: &'static str,
+    /// Env var naming a file that holds the secret.
+    env_file_var: &'static str,
+    /// TOML field, also used in error messages (`{field}` and `{field}_file`).
+    field: &'static str,
 }
 
 /// Picks one secret's winning layer before reading any file, so a lower
@@ -493,10 +509,13 @@ fn resolve_secret(
     cli_value: Option<SecretString>,
     (toml_value, toml_file): (Option<SecretString>, Option<String>),
     env: &impl Env,
-    env_var: &str,
-    env_file_var: &str,
-    field: &str,
+    source: &SecretSource,
 ) -> anyhow::Result<Option<SecretString>> {
+    let &SecretSource {
+        env_var,
+        env_file_var,
+        field,
+    } = source;
     if cli_value.is_some() {
         return Ok(cli_value);
     }
@@ -529,8 +548,8 @@ mod tests {
     use myapp_core::{SecretString, secret::MASKED_VALUE};
     use std::fs;
 
-    fn expose_secret_opt(secret: &Option<SecretString>) -> Option<&str> {
-        secret.as_ref().map(|val| val.expose_secret())
+    fn expose_secret_opt(secret: Option<&SecretString>) -> Option<&str> {
+        secret.map(SecretString::expose_secret)
     }
 
     /// Writes `toml` as the config file and returns an env pointing at it,
@@ -611,7 +630,7 @@ token = "my-secret-token"
         assert_eq!(parsed.mcp.host, "0.0.0.0");
         assert_eq!(parsed.mcp.port, 9090);
         assert_eq!(
-            expose_secret_opt(&parsed.mcp.token),
+            expose_secret_opt(parsed.mcp.token.as_ref()),
             Some("my-secret-token")
         );
     }
@@ -697,7 +716,10 @@ origins = ["*"]
         assert_eq!(config.mcp.host, "0.0.0.0");
         assert_eq!(config.mcp.port, 9191);
         assert_eq!(config.mcp.auth_mode, AuthMode::OAuth);
-        assert_eq!(expose_secret_opt(&config.mcp.token), Some("env-token"));
+        assert_eq!(
+            expose_secret_opt(config.mcp.token.as_ref()),
+            Some("env-token")
+        );
     }
     // template:end oauth
 
@@ -716,8 +738,8 @@ origins = ["*"]
     // template:begin oauth
     #[test]
     fn auth_mode_parses_from_toml_env_and_cli() {
-        let (_directory, env) = env_with_toml("[mcp]\nauth_mode = \"oauth\"\n");
-        assert_eq!(load_http(&env).unwrap().mcp.auth_mode, AuthMode::OAuth);
+        let (_toml_directory, toml_env) = env_with_toml("[mcp]\nauth_mode = \"oauth\"\n");
+        assert_eq!(load_http(&toml_env).unwrap().mcp.auth_mode, AuthMode::OAuth);
 
         let (_directory, env) = isolated_env();
         let env = env.with("MYAPP_MCP_AUTH_MODE", " none ");
@@ -739,12 +761,12 @@ origins = ["*"]
             "{err}"
         );
 
-        let (_directory, env) = env_with_toml("[mcp]\nauth_mode = \"o-auth\"\n");
-        load_http(&env).unwrap_err();
+        let (_toml_directory, toml_env) = env_with_toml("[mcp]\nauth_mode = \"o-auth\"\n");
+        load_http(&toml_env).unwrap_err();
 
         let parsed = crate::shared::Args::try_parse_from(["myapp-mcp", "--auth-mode", "o-auth"]);
         assert_eq!(
-            parsed.err().map(|err| err.kind()),
+            parsed.err().map(|error| error.kind()),
             Some(clap::error::ErrorKind::InvalidValue)
         );
     }
@@ -938,10 +960,10 @@ origins = ["*"]
     fn confirm_destructive_defaults_true_and_toml_and_env_override() {
         assert!(ServerConfig::default().mcp.confirm_destructive);
 
-        let (_directory, env) = env_with_toml("[mcp]\nconfirm_destructive = false\n");
-        assert!(!load_stdio(&env).unwrap().mcp.confirm_destructive);
-        let env = env.with(ENV_MCP_CONFIRM_DESTRUCTIVE, "true");
-        assert!(load_stdio(&env).unwrap().mcp.confirm_destructive);
+        let (_toml_directory, toml_env) = env_with_toml("[mcp]\nconfirm_destructive = false\n");
+        assert!(!load_stdio(&toml_env).unwrap().mcp.confirm_destructive);
+        let toml_env = toml_env.with(ENV_MCP_CONFIRM_DESTRUCTIVE, "true");
+        assert!(load_stdio(&toml_env).unwrap().mcp.confirm_destructive);
 
         let (_directory, env) = isolated_env();
         let env = env.with(ENV_MCP_CONFIRM_DESTRUCTIVE, "false");
@@ -989,7 +1011,7 @@ origins = ["*"]
     fn toml_token_applies_when_no_higher_layer_sets_one() {
         let (_directory, env) = env_with_toml("[mcp]\ntoken = \"toml\"\n");
         let config = load_http(&env).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.token), Some("toml"));
+        assert_eq!(expose_secret_opt(config.mcp.token.as_ref()), Some("toml"));
     }
     #[test]
     fn toml_token_file_is_read_and_trimmed() {
@@ -997,7 +1019,10 @@ origins = ["*"]
         let path = secret_file(&directory, "token", "  file-token\n");
         let (_config_directory, env) = env_with_toml(&format!("[mcp]\ntoken_file = {path:?}\n"));
         let config = load_http(&env).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.token), Some("file-token"));
+        assert_eq!(
+            expose_secret_opt(config.mcp.token.as_ref()),
+            Some("file-token")
+        );
         assert!(config.mcp.token_file.is_none());
     }
     #[test]
@@ -1006,7 +1031,10 @@ origins = ["*"]
         let path = secret_file(&directory, "token", "  file-token\n");
         let env = env.with("MYAPP_MCP_TOKEN_FILE", path);
         let config = load_http(&env).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.token), Some("file-token"));
+        assert_eq!(
+            expose_secret_opt(config.mcp.token.as_ref()),
+            Some("file-token")
+        );
     }
     // template:end http
 
@@ -1017,7 +1045,10 @@ origins = ["*"]
         let path = secret_file(&directory, "pin", "file-pin\n");
         let env = env.with("MYAPP_MCP_OAUTH_PIN_FILE", path);
         let config = load_http(&env).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.oauth_pin), Some("file-pin"));
+        assert_eq!(
+            expose_secret_opt(config.mcp.oauth_pin.as_ref()),
+            Some("file-pin")
+        );
     }
     // template:end oauth
 
@@ -1029,7 +1060,10 @@ origins = ["*"]
             .with("MYAPP_MCP_TOKEN", "env-token")
             .with("MYAPP_MCP_TOKEN_FILE", missing_file(&directory));
         let config = load_http(&env).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.token), Some("env-token"));
+        assert_eq!(
+            expose_secret_opt(config.mcp.token.as_ref()),
+            Some("env-token")
+        );
     }
     // template:end http
 
@@ -1041,7 +1075,10 @@ origins = ["*"]
             .with("MYAPP_MCP_OAUTH_PIN", "env-pin")
             .with("MYAPP_MCP_OAUTH_PIN_FILE", missing_file(&directory));
         let config = load_http(&env).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.oauth_pin), Some("env-pin"));
+        assert_eq!(
+            expose_secret_opt(config.mcp.oauth_pin.as_ref()),
+            Some("env-pin")
+        );
     }
     // template:end oauth
 
@@ -1053,7 +1090,10 @@ origins = ["*"]
         let (_config_directory, env) = env_with_toml(&toml);
         let env = env.with("MYAPP_MCP_TOKEN", "env-token");
         let config = load_http(&env).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.token), Some("env-token"));
+        assert_eq!(
+            expose_secret_opt(config.mcp.token.as_ref()),
+            Some("env-token")
+        );
     }
     #[test]
     fn toml_token_and_token_file_together_are_rejected() {
@@ -1087,7 +1127,7 @@ origins = ["*"]
         let (_directory, env) = env_with_toml("[mcp]\ntoken = \"toml\"\n");
         let env = env.with("MYAPP_MCP_TOKEN", "");
         let config = load_http(&env).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.token), Some("toml"));
+        assert_eq!(expose_secret_opt(config.mcp.token.as_ref()), Some("toml"));
     }
     #[test]
     fn unreadable_env_token_file_is_an_error_naming_the_field_and_path() {
@@ -1147,7 +1187,10 @@ origins = ["*"]
         let env = env.with("MYAPP_MCP_TOKEN", "env-token");
         let overrides = cli_overrides(&["--token", "cli-token"]);
         let config = ServerConfig::load_with_env(None, &overrides, &env, Transport::Http).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.token), Some("cli-token"));
+        assert_eq!(
+            expose_secret_opt(config.mcp.token.as_ref()),
+            Some("cli-token")
+        );
     }
     #[test]
     fn cli_token_wins_without_reading_env_token_file() {
@@ -1155,7 +1198,7 @@ origins = ["*"]
         let env = env.with("MYAPP_MCP_TOKEN_FILE", missing_file(&directory));
         let overrides = cli_overrides(&["--token", "t"]);
         let config = ServerConfig::load_with_env(None, &overrides, &env, Transport::Http).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.token), Some("t"));
+        assert_eq!(expose_secret_opt(config.mcp.token.as_ref()), Some("t"));
     }
     // template:end http
 
@@ -1166,7 +1209,10 @@ origins = ["*"]
         let env = env.with("MYAPP_MCP_OAUTH_PIN_FILE", missing_file(&directory));
         let overrides = cli_overrides(&["--oauth-pin", "cli-pin"]);
         let config = ServerConfig::load_with_env(None, &overrides, &env, Transport::Http).unwrap();
-        assert_eq!(expose_secret_opt(&config.mcp.oauth_pin), Some("cli-pin"));
+        assert_eq!(
+            expose_secret_opt(config.mcp.oauth_pin.as_ref()),
+            Some("cli-pin")
+        );
     }
     // template:end oauth
 
@@ -1176,7 +1222,10 @@ origins = ["*"]
         let env = env.with("MYAPP_API_KEY_FILE", missing_file(&directory));
         let overrides = cli_overrides(&["--api-key", "cli-key"]);
         let config = ServerConfig::load_with_env(None, &overrides, &env, Transport::Stdio).unwrap();
-        assert_eq!(expose_secret_opt(&config.core.api_key), Some("cli-key"));
+        assert_eq!(
+            expose_secret_opt(config.core.api_key.as_ref()),
+            Some("cli-key")
+        );
     }
 
     #[test]

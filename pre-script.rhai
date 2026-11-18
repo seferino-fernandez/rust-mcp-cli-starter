@@ -92,6 +92,10 @@ let upper = to_shouty_snake_case(snake);     // e.g. ACME_TOOLS
 // -------------------------------------------------------------------------
 file::delete("README.md");
 file::rename("README.generated.md", "README.md");
+// Same for AGENTS.md: the template's own AGENTS.md carries template-maintainer
+// rules; AGENTS.generated.md holds the project's agent rules.
+file::delete("AGENTS.md");
+file::rename("AGENTS.generated.md", "AGENTS.md");
 
 // -------------------------------------------------------------------------
 // Token replacement across all text files.

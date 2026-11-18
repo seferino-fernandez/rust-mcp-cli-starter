@@ -10,7 +10,7 @@ use myapp_core::models::{Item, NewItem};
 
 /// `item` subcommands.
 #[derive(Subcommand)]
-pub enum ItemCommand {
+pub(crate) enum ItemCommand {
     /// List items (paginated).
     List {
         /// Page number (1-based).
@@ -41,7 +41,7 @@ pub enum ItemCommand {
 }
 
 /// Runs an `item` subcommand.
-pub async fn run(
+pub(crate) async fn run(
     command: &ItemCommand,
     client: &ApiClient,
     output: OutputFormat,
@@ -51,11 +51,14 @@ pub async fn run(
             let result = client
                 .list_items(*page, *page_size)
                 .await
-                .map_err(safe_core_error)?;
+                .map_err(|error| safe_core_error(&error))?;
             render_items(&result.records, output)?;
         }
         ItemCommand::Get { id } => {
-            let item = client.get_item(*id).await.map_err(safe_core_error)?;
+            let item = client
+                .get_item(*id)
+                .await
+                .map_err(|error| safe_core_error(&error))?;
             render_items(slice::from_ref(&item), output)?;
         }
         ItemCommand::Create { name, enabled } => {
@@ -65,12 +68,15 @@ pub async fn run(
                     enabled: *enabled,
                 })
                 .await
-                .map_err(safe_core_error)?;
+                .map_err(|error| safe_core_error(&error))?;
             render_items(slice::from_ref(&item), output)?;
         }
         ItemCommand::Delete { id } => {
-            client.delete_item(*id).await.map_err(safe_core_error)?;
-            println!("Deleted item {id}");
+            client
+                .delete_item(*id)
+                .await
+                .map_err(|error| safe_core_error(&error))?;
+            crate::output::write_line(&format!("Deleted item {id}"))?;
         }
     }
     Ok(())
@@ -83,8 +89,8 @@ fn render_items(items: &[Item], output: OutputFormat) -> anyhow::Result<()> {
         .collect();
     match output {
         OutputFormat::Json => crate::output::print_json(&items)?,
-        OutputFormat::Csv => crate::output::print_csv(&["id", "name", "enabled"], &rows),
-        OutputFormat::Table => crate::output::print_table(&["ID", "Name", "Enabled"], &rows),
+        OutputFormat::Csv => crate::output::print_csv(&["id", "name", "enabled"], &rows)?,
+        OutputFormat::Table => crate::output::print_table(&["ID", "Name", "Enabled"], &rows)?,
     }
     Ok(())
 }

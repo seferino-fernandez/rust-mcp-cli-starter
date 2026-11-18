@@ -1,5 +1,6 @@
 //! Output formatting helpers for the `myapp` CLI.
 
+use std::fmt;
 use std::io::{ErrorKind, Write};
 
 use comfy_table::{ContentArrangement, Table};
@@ -7,7 +8,7 @@ use serde::Serialize;
 
 /// Output format for CLI commands.
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum OutputFormat {
+pub(crate) enum OutputFormat {
     /// Human-readable table (default).
     Table,
     /// JSON (pretty-printed).
@@ -16,37 +17,47 @@ pub enum OutputFormat {
     Csv,
 }
 
-/// Writes a single line to stdout, exiting cleanly if the downstream pipe was
-/// closed (e.g. `... | head`). Without this, the default `println!` panics on
+/// The downstream reader closed stdout (e.g. `... | head`).
+///
+/// Output stops at the first such write, and `main` exits successfully: the
+/// reader took all the output it wanted.
+#[derive(Debug)]
+pub(crate) struct StdoutClosed;
+
+impl fmt::Display for StdoutClosed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("stdout was closed")
+    }
+}
+
+impl std::error::Error for StdoutClosed {}
+
+/// Writes a single line to stdout, failing with [`StdoutClosed`] if the
+/// downstream pipe was closed. Without this, the default `println!` panics on
 /// `BrokenPipe`. Other write errors are ignored (best-effort terminal output).
-fn write_line(line: &str) {
-    let stdout = std::io::stdout();
-    let mut lock = stdout.lock();
-    match writeln!(lock, "{line}") {
-        Ok(()) => {}
-        Err(err) if err.kind() == ErrorKind::BrokenPipe => {
-            std::process::exit(0);
-        }
-        Err(_) => {}
+pub(crate) fn write_line(line: &str) -> Result<(), StdoutClosed> {
+    match writeln!(std::io::stdout().lock(), "{line}") {
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => Err(StdoutClosed),
+        Ok(()) | Err(_) => Ok(()),
     }
 }
 
 /// Renders `data` as pretty JSON and writes it to stdout.
-pub fn print_json<T: Serialize>(data: &T) -> anyhow::Result<()> {
+pub(crate) fn print_json<T: Serialize>(data: &T) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(data)?;
-    write_line(&json);
+    write_line(&json)?;
     Ok(())
 }
 
 /// Renders `rows` as a [`comfy_table`] table with `headers` and writes it to stdout.
-pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+pub(crate) fn print_table(headers: &[&str], rows: &[Vec<String>]) -> Result<(), StdoutClosed> {
     let mut table = Table::new();
     table.set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(headers);
     for row in rows {
         table.add_row(row);
     }
-    write_line(&table.to_string());
+    write_line(&table.to_string())
 }
 
 /// Escapes a single CSV field, quoting it when necessary.
@@ -59,16 +70,17 @@ fn escape_csv_field(field: &str) -> String {
 }
 
 /// Renders `rows` as CSV with a `headers` row and writes it to stdout.
-pub fn print_csv(headers: &[&str], rows: &[Vec<String>]) {
+pub(crate) fn print_csv(headers: &[&str], rows: &[Vec<String>]) -> Result<(), StdoutClosed> {
     let escaped_headers: Vec<String> = headers
         .iter()
         .map(|header| escape_csv_field(header))
         .collect();
-    write_line(&escaped_headers.join(","));
+    write_line(&escaped_headers.join(","))?;
     for row in rows {
         let escaped: Vec<String> = row.iter().map(|field| escape_csv_field(field)).collect();
-        write_line(&escaped.join(","));
+        write_line(&escaped.join(","))?;
     }
+    Ok(())
 }
 
 #[cfg(test)]

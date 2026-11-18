@@ -1,0 +1,11 @@
+id: no-todo-in-integration-tests
+language: Rust
+severity: error
+message: Test code must not contain placeholder macros.
+files:
+  - crates/*/tests/**/*.rs
+rule:
+  kind: macro_invocation
+  has:
+    field: macro
+    regex: '(^|::)(todo|unimplemented)$'

@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 use crate::middleware::oauth::{OAuthMiddlewareState, oauth_bearer_auth};
 use crate::oauth::limiter::{BASE_BACKOFF, MAX_FAILURES, PinLimiter};
 use crate::oauth::model::OAuthEndpointState;
-use crate::oauth::store::{OAuthStore, OAuthStoreConfig};
+use crate::oauth::store::{AccessToken, OAuthStore, OAuthStoreConfig};
 use crate::secret_digest::SecretDigest;
 
 use super::*;
+use axum::response::Response;
 use axum::routing::post;
 use axum::{
     Router,
@@ -30,21 +31,27 @@ async fn protected_handler() -> &'static str {
 
 /// Build a minimal router with OAuth endpoints + a protected /test route.
 /// Returns (`Router`, `OAuthStore`) so tests can reach into the store.
-fn build_test_router(oauth_pin: Option<String>) -> (Router, OAuthStore) {
+fn build_test_router(oauth_pin: Option<&str>) -> (Router, OAuthStore) {
     build_test_router_with_limiter(oauth_pin, PinLimiter::default())
 }
 
 /// Like [`build_test_router`], starting from `pin_limiter`.
 fn build_test_router_with_limiter(
-    oauth_pin: Option<String>,
+    oauth_pin: Option<&str>,
     pin_limiter: PinLimiter,
 ) -> (Router, OAuthStore) {
     build_test_router_with(oauth_pin, pin_limiter, OAuthStoreConfig::default())
 }
 
+/// Like [`build_test_router`], with no PIN and a store built from
+/// `store_config`.
+fn build_test_router_with_store(store_config: OAuthStoreConfig) -> (Router, OAuthStore) {
+    build_test_router_with(None, PinLimiter::default(), store_config)
+}
+
 /// Like [`build_test_router_with_limiter`], with a store built from `store_config`.
 fn build_test_router_with(
-    oauth_pin: Option<String>,
+    oauth_pin: Option<&str>,
     pin_limiter: PinLimiter,
     store_config: OAuthStoreConfig,
 ) -> (Router, OAuthStore) {
@@ -54,7 +61,7 @@ fn build_test_router_with(
     let endpoint_state = Arc::new(OAuthEndpointState {
         store: store_instance.clone(),
         base_url: base.clone(),
-        oauth_pin: oauth_pin.as_deref().map(SecretDigest::new),
+        oauth_pin: oauth_pin.map(SecretDigest::new),
         pin_limiter: Arc::new(Mutex::new(pin_limiter)),
     });
 
@@ -103,20 +110,52 @@ async fn body_to_json(body: Body) -> serde_json::Value {
     serde_json::from_str(&text).unwrap()
 }
 
+/// Send `request` through `app`.
+async fn send(app: &Router, request: Request<Body>) -> Response {
+    app.clone().oneshot(request).await.unwrap()
+}
+
+/// `GET uri` with no body.
+async fn get_uri(app: &Router, uri: &str) -> Response {
+    send(app, Request::get(uri).body(Body::empty()).unwrap()).await
+}
+
+/// `GET uri`, asserting a 200, and return the JSON body.
+async fn get_json(app: &Router, uri: &str) -> serde_json::Value {
+    let response = get_uri(app, uri).await;
+    assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    body_to_json(response.into_body()).await
+}
+
+/// `POST path` with `body` as `content_type`.
+async fn post_body(app: &Router, path: &str, content_type: &str, body: String) -> Response {
+    send(
+        app,
+        Request::post(path)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await
+}
+
+/// `POST path` with `fields` as a URL-encoded form.
+async fn post_form(app: &Router, path: &str, fields: &[(&str, &str)]) -> Response {
+    let body = serde_urlencoded::to_string(fields).unwrap();
+    post_body(app, path, "application/x-www-form-urlencoded", body).await
+}
+
+/// The value of header `name`, which `response` must carry.
+fn header_str<'r>(response: &'r Response, name: &str) -> &'r str {
+    response.headers().get(name).unwrap().to_str().unwrap()
+}
+
 #[tokio::test]
 async fn protected_route_requires_auth() {
     let (app, _store) = build_test_router(None);
-    let response = app
-        .oneshot(Request::get("/test").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let response = get_uri(&app, "/test").await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let www_auth = response
-        .headers()
-        .get(header::WWW_AUTHENTICATE)
-        .unwrap()
-        .to_str()
-        .unwrap();
+    let www_auth = header_str(&response, header::WWW_AUTHENTICATE.as_str());
     assert!(
         www_auth.contains("oauth-protected-resource"),
         "WWW-Authenticate: {www_auth}"
@@ -127,57 +166,25 @@ async fn protected_route_requires_auth() {
 async fn metadata_endpoints_return_json() {
     let (app, _store) = build_test_router(None);
 
-    let response = app
-        .clone()
-        .oneshot(
-            Request::get("/.well-known/oauth-protected-resource")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_to_json(response.into_body()).await;
-    assert!(!json["authorization_servers"].as_array().unwrap().is_empty());
-    assert!(
-        json["scopes_supported"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|scope| scope == "read")
+    let resource = get_json(&app, "/.well-known/oauth-protected-resource").await;
+    assert_ne!(
+        *resource["authorization_servers"].as_array().unwrap(),
+        Vec::<serde_json::Value>::new()
     );
-    assert!(
-        json["scopes_supported"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|scope| scope == "write")
-    );
+    let scopes = resource["scopes_supported"].as_array().unwrap();
+    for expected in ["read", "write"] {
+        assert!(scopes.iter().any(|scope| scope == expected), "{expected}");
+    }
 
-    let response = app
-        .oneshot(
-            Request::get("/.well-known/oauth-authorization-server")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_to_json(response.into_body()).await;
-    assert!(
-        json["authorization_endpoint"]
-            .as_str()
-            .unwrap()
-            .contains("/oauth/authorize")
-    );
-    assert!(
-        json["token_endpoint"]
-            .as_str()
-            .unwrap()
-            .contains("/oauth/token")
-    );
+    let server = get_json(&app, "/.well-known/oauth-authorization-server").await;
+    for (field, path) in [
+        ("authorization_endpoint", "/oauth/authorize"),
+        ("token_endpoint", "/oauth/token"),
+    ] {
+        assert!(server[field].as_str().unwrap().contains(path), "{field}");
+    }
     assert_eq!(
-        json["code_challenge_methods_supported"],
+        server["code_challenge_methods_supported"],
         serde_json::json!(["S256"])
     );
 }
@@ -185,32 +192,17 @@ async fn metadata_endpoints_return_json() {
 #[tokio::test]
 async fn metadata_at_suffixed_path() {
     let (app, _store) = build_test_router(None);
-    let response = app
-        .oneshot(
-            Request::get("/.well-known/oauth-protected-resource/mcp")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_to_json(response.into_body()).await;
-    assert!(!json["authorization_servers"].as_array().unwrap().is_empty());
+    let json = get_json(&app, "/.well-known/oauth-protected-resource/mcp").await;
+    assert_ne!(
+        *json["authorization_servers"].as_array().unwrap(),
+        Vec::<serde_json::Value>::new()
+    );
 }
 
 #[tokio::test]
 async fn openid_configuration_returns_metadata() {
     let (app, _store) = build_test_router(None);
-    let response = app
-        .oneshot(
-            Request::get("/.well-known/openid-configuration")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_to_json(response.into_body()).await;
+    let json = get_json(&app, "/.well-known/openid-configuration").await;
     assert!(
         json["authorization_endpoint"]
             .as_str()
@@ -224,24 +216,14 @@ async fn openid_configuration_returns_metadata() {
 #[tokio::test]
 async fn dynamic_client_registration() {
     let (app, _store) = build_test_router(None);
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/oauth/register")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "client_name": "Test Client",
-                        "redirect_uris": ["http://localhost:8080/callback"]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let json = body_to_json(response.into_body()).await;
+    let registration = post_register_named(
+        &app,
+        "Test Client",
+        &["http://localhost:8080/callback".to_string()],
+    )
+    .await;
+    assert_eq!(registration.status(), StatusCode::CREATED);
+    let json = body_to_json(registration.into_body()).await;
     assert!(
         json["client_id"]
             .as_str()
@@ -256,15 +238,7 @@ async fn dynamic_client_registration() {
         serde_json::json!(["http://localhost:8080/callback"])
     );
 
-    let response = app
-        .oneshot(
-            Request::get("/.well-known/oauth-authorization-server")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let metadata = body_to_json(response.into_body()).await;
+    let metadata = get_json(&app, "/.well-known/oauth-authorization-server").await;
     assert_eq!(
         metadata["token_endpoint_auth_methods_supported"],
         serde_json::json!(["none"])
@@ -276,65 +250,27 @@ async fn full_oauth_flow() {
     let (app, _store) = build_test_router(None);
 
     // 1. Register client
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/oauth/register")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "client_name": "Test",
-                        "redirect_uris": ["http://localhost/cb"]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let registration = body_to_json(response.into_body()).await;
-    let client_id = registration["client_id"].as_str().unwrap().to_string();
+    let client_id = register_named_client(&app, "Test", &["http://localhost/cb"]).await;
 
-    // 2. Generate PKCE verifier and challenge
+    // 2. PKCE verifier (the challenge is derived from it)
     let verifier = "test-verifier-string-that-is-long-enough-for-pkce";
-    let challenge = pkce::challenge_from_verifier(verifier);
 
     // 3. Authorize, then submit approval from the consent page
-    let consent_nonce = authorize_nonce(
+    let approval = approve_request(
         &app,
-        &client_id,
-        "http://localhost/cb",
-        "read write",
-        "test-state",
-        &challenge,
+        &AuthorizeRequest {
+            scope: "read write",
+            state: "test-state",
+            verifier,
+            ..AuthorizeRequest::read(&client_id)
+        },
+        &[("pin", "")],
     )
     .await;
-    let form_body = serde_urlencoded::to_string([
-        ("consent_nonce", consent_nonce.as_str()),
-        ("approved", "true"),
-        ("pin", ""),
-    ])
-    .unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/oauth/approve")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(form_body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
 
     // Should redirect with code
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let location = response
-        .headers()
-        .get("location")
-        .unwrap()
-        .to_str()
-        .unwrap();
+    assert_eq!(approval.status(), StatusCode::SEE_OTHER);
+    let location = location_header(&approval);
     assert!(
         location.starts_with("http://localhost/cb?code=myapp_ac_"),
         "location: {location}"
@@ -343,38 +279,17 @@ async fn full_oauth_flow() {
         location.contains("state=test-state"),
         "location: {location}"
     );
-
-    // Extract code from redirect URL
-    let redirect_url = url::Url::parse(location).unwrap();
-    let auth_code = redirect_url
-        .query_pairs()
-        .find(|(key, _)| key == "code")
-        .unwrap()
-        .1
-        .to_string();
+    let auth_code = code_from_location(&location);
 
     // 4. Exchange code for token
-    let token_body = serde_urlencoded::to_string([
-        ("grant_type", "authorization_code"),
-        ("code", auth_code.as_str()),
-        ("client_id", client_id.as_str()),
-        ("redirect_uri", "http://localhost/cb"),
-        ("code_verifier", verifier),
-    ])
-    .unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/oauth/token")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(token_body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let token_json = body_to_json(response.into_body()).await;
+    let token_json = exchange_ok(
+        &app,
+        &auth_code,
+        &client_id,
+        "http://localhost/cb",
+        verifier,
+    )
+    .await;
     let access_token = token_json["access_token"].as_str().unwrap().to_string();
     let refresh_token = token_json["refresh_token"].as_str().unwrap().to_string();
     assert!(access_token.starts_with("myapp_at_"));
@@ -383,79 +298,38 @@ async fn full_oauth_flow() {
     assert_eq!(token_json["scope"], "read write");
 
     // 5. Access protected route with token
-    let response = app
-        .clone()
-        .oneshot(
-            Request::get("/test")
-                .header("authorization", format!("Bearer {access_token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(body_to_string(response.into_body()).await, "OK");
+    let authorized = get_protected(&app, &access_token).await;
+    assert_eq!(authorized.status(), StatusCode::OK);
+    assert_eq!(body_to_string(authorized.into_body()).await, "OK");
 
     // 6. Invalid token gets 401
-    let response = app
-        .clone()
-        .oneshot(
-            Request::get("/test")
-                .header("authorization", "Bearer invalid-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let invalid = get_protected(&app, "invalid-token").await;
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
 
     // 7. Refresh token
-    let refresh_body = serde_urlencoded::to_string([
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token.as_str()),
-        ("client_id", client_id.as_str()),
-    ])
-    .unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/oauth/token")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(refresh_body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let new_token_json = body_to_json(response.into_body()).await;
+    let new_token_json = refresh_ok(&app, &refresh_token, &client_id).await;
     let new_access_token = new_token_json["access_token"].as_str().unwrap().to_string();
     assert_ne!(new_access_token, access_token, "new token should differ");
 
     // 8. Old token is revoked
-    let response = app
-        .clone()
-        .oneshot(
-            Request::get("/test")
-                .header("authorization", format!("Bearer {access_token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let revoked = get_protected(&app, &access_token).await;
+    assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
 
     // 9. New token works
-    let response = app
-        .oneshot(
-            Request::get("/test")
-                .header("authorization", format!("Bearer {new_access_token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let renewed = get_protected(&app, &new_access_token).await;
+    assert_eq!(renewed.status(), StatusCode::OK);
+}
+
+/// `GET /test` with `access_token` as the Bearer token.
+async fn get_protected(app: &Router, access_token: &str) -> Response {
+    send(
+        app,
+        Request::get("/test")
+            .header("authorization", format!("Bearer {access_token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -463,29 +337,18 @@ async fn pkce_failure_rejects_token_exchange() {
     let (app, _store) = build_test_router(None);
     let client_id = register_client(&app, "http://localhost/cb").await;
 
-    let verifier = "correct-verifier";
-    let challenge = pkce::challenge_from_verifier(verifier);
-
     // Approve
-    let consent_nonce = authorize_nonce(
+    let approval = approve_request(
         &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "",
-        &challenge,
+        &AuthorizeRequest {
+            state: "",
+            verifier: "correct-verifier",
+            ..AuthorizeRequest::read(&client_id)
+        },
+        &[("pin", "")],
     )
     .await;
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-            ("pin", ""),
-        ],
-    )
-    .await;
-    let auth_code = code_from_location(&location_header(&response));
+    let auth_code = code_from_location(&location_header(&approval));
 
     // Exchange with WRONG verifier
     let response = exchange_code(
@@ -509,65 +372,30 @@ async fn consent_page_has_anti_clickjacking_headers() {
 
     let challenge = pkce::challenge_from_verifier("test-verifier");
 
-    let response = app
-        .oneshot(
-            Request::get(format!(
-                "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256",
-                client_id,
-                urlencoding::encode("http://localhost/cb"),
-                challenge
-            ))
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = get_uri(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256",
+            client_id,
+            urlencoding::encode("http://localhost/cb"),
+            challenge
+        ),
+    )
+    .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-
-    let x_frame = response
-        .headers()
-        .get("x-frame-options")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    assert_eq!(x_frame, "DENY");
-
-    let csp = response
-        .headers()
-        .get("content-security-policy")
-        .unwrap()
-        .to_str()
-        .unwrap();
+    assert_eq!(header_str(&response, "x-frame-options"), "DENY");
+    let csp = header_str(&response, "content-security-policy");
     assert!(csp.contains("frame-ancestors 'none'"));
 }
 
 #[tokio::test]
 async fn pin_required_rejects_wrong_pin() {
-    let (app, _store) = build_test_router(Some("secret-pin".to_string()));
+    let (app, _store) = build_test_router(Some("secret-pin"));
     let client_id = register_client(&app, "http://localhost/cb").await;
 
-    let challenge = pkce::challenge_from_verifier("verifier");
-
     // Approve with wrong pin
-    let consent_nonce = authorize_nonce(
-        &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "s",
-        &challenge,
-    )
-    .await;
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-            ("pin", "wrong-pin"),
-        ],
-    )
-    .await;
+    let response = submit_consent(&app, &client_id, true, Some("wrong-pin")).await;
     let location = location_header(&response);
     assert!(
         location.contains("error=access_denied"),
@@ -582,6 +410,12 @@ async fn pin_required_rejects_wrong_pin() {
 /// Register a client for `redirect_uri` and return its `client_id`.
 async fn register_client(app: &Router, redirect_uri: &str) -> String {
     let response = post_register(app, &[redirect_uri]).await;
+    client_id_of_registration(response).await
+}
+
+/// Asserts `response` is a successful registration and returns its
+/// `client_id`.
+async fn client_id_of_registration(response: Response) -> String {
     assert_eq!(response.status(), StatusCode::CREATED);
     body_to_json(response.into_body()).await["client_id"]
         .as_str()
@@ -590,54 +424,80 @@ async fn register_client(app: &Router, redirect_uri: &str) -> String {
 }
 
 /// POST the consent form with `fields` and return the response.
-async fn post_approve(app: &Router, fields: &[(&str, &str)]) -> axum::response::Response {
-    app.clone()
-        .oneshot(
-            Request::post("/oauth/approve")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(serde_urlencoded::to_string(fields).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
+async fn post_approve(app: &Router, fields: &[(&str, &str)]) -> Response {
+    post_form(app, "/oauth/approve", fields).await
 }
 
-fn location_header(response: &axum::response::Response) -> String {
-    response
-        .headers()
-        .get(header::LOCATION)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string()
+/// POST the consent form approving `consent_nonce`, adding `extra` fields.
+async fn approve_nonce(app: &Router, consent_nonce: &str, extra: &[(&str, &str)]) -> Response {
+    let mut fields = vec![("consent_nonce", consent_nonce), ("approved", "true")];
+    fields.extend_from_slice(extra);
+    post_approve(app, &fields).await
 }
 
-/// `GET /oauth/authorize` for `client_id` and `redirect_uri` with `scope`,
-/// `state` and the S256 `challenge`, and return the consent page HTML.
-async fn authorize_page(
+/// Authorize `request` like [`authorize_nonce`] and approve the consent
+/// page's nonce like [`approve_nonce`].
+async fn approve_request(
     app: &Router,
-    client_id: &str,
-    redirect_uri: &str,
-    scope: &str,
-    state: &str,
-    challenge: &str,
-) -> String {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::get(format!(
-                "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
-                urlencoding::encode(client_id),
-                urlencoding::encode(redirect_uri),
-                urlencoding::encode(scope),
-                urlencoding::encode(state),
-                urlencoding::encode(challenge),
-            ))
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    request: &AuthorizeRequest<'_>,
+    extra: &[(&str, &str)],
+) -> Response {
+    let consent_nonce = authorize_nonce(app, request).await;
+    approve_nonce(app, &consent_nonce, extra).await
+}
+
+fn location_header(response: &Response) -> String {
+    header_str(response, header::LOCATION.as_str()).to_string()
+}
+
+/// The query pairs of a redirect `location`.
+fn query_pairs(location: &str) -> Vec<(String, String)> {
+    url::Url::parse(location)
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect()
+}
+
+/// The parameters of a `GET /oauth/authorize` request with the S256
+/// challenge of `verifier`.
+struct AuthorizeRequest<'a> {
+    client_id: &'a str,
+    redirect_uri: &'a str,
+    scope: &'a str,
+    state: &'a str,
+    verifier: &'a str,
+}
+
+impl<'a> AuthorizeRequest<'a> {
+    /// `client_id` asking for `read` at `http://localhost/cb`, with state `s`
+    /// and verifier `verifier`.
+    fn read(client_id: &'a str) -> Self {
+        Self {
+            client_id,
+            redirect_uri: "http://localhost/cb",
+            scope: "read",
+            state: "s",
+            verifier: "verifier",
+        }
+    }
+}
+
+/// `GET /oauth/authorize` with `request` and return the consent page HTML.
+async fn authorize_page(app: &Router, request: &AuthorizeRequest<'_>) -> String {
+    let challenge = pkce::challenge_from_verifier(request.verifier);
+    let response = get_uri(
+        app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+            urlencoding::encode(request.client_id),
+            urlencoding::encode(request.redirect_uri),
+            urlencoding::encode(request.scope),
+            urlencoding::encode(request.state),
+            urlencoding::encode(&challenge),
+        ),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
     body_to_string(response.into_body()).await
 }
@@ -652,15 +512,8 @@ fn consent_nonce(html: &str) -> String {
 
 /// Authorize through `GET /oauth/authorize` like [`authorize_page`] and return
 /// the consent nonce from the page.
-async fn authorize_nonce(
-    app: &Router,
-    client_id: &str,
-    redirect_uri: &str,
-    scope: &str,
-    state: &str,
-    challenge: &str,
-) -> String {
-    consent_nonce(&authorize_page(app, client_id, redirect_uri, scope, state, challenge).await)
+async fn authorize_nonce(app: &Router, request: &AuthorizeRequest<'_>) -> String {
+    consent_nonce(&authorize_page(app, request).await)
 }
 
 /// The authorization code in an approval redirect.
@@ -681,25 +534,32 @@ async fn exchange_code(
     client_id: &str,
     redirect_uri: &str,
     verifier: &str,
-) -> axum::response::Response {
-    app.clone()
-        .oneshot(
-            Request::post("/oauth/token")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    serde_urlencoded::to_string([
-                        ("grant_type", "authorization_code"),
-                        ("code", code),
-                        ("client_id", client_id),
-                        ("redirect_uri", redirect_uri),
-                        ("code_verifier", verifier),
-                    ])
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
+) -> Response {
+    post_form(
+        app,
+        "/oauth/token",
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("client_id", client_id),
+            ("redirect_uri", redirect_uri),
+            ("code_verifier", verifier),
+        ],
+    )
+    .await
+}
+
+/// Like [`exchange_code`], asserting a 200, and return the token JSON.
+async fn exchange_ok(
+    app: &Router,
+    code: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    verifier: &str,
+) -> serde_json::Value {
+    let response = exchange_code(app, code, client_id, redirect_uri, verifier).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    body_to_json(response.into_body()).await
 }
 
 #[tokio::test]
@@ -708,28 +568,21 @@ async fn approve_drops_unknown_scopes_and_defaults_to_read() {
     let client_id = register_client(&app, "http://localhost/cb").await;
 
     let verifier = "unknown-scope-verifier-that-is-long-enough-for-pkce";
-    let challenge = pkce::challenge_from_verifier(verifier);
-    let consent_nonce = authorize_nonce(
+    let approval = approve_request(
         &app,
-        &client_id,
-        "http://localhost/cb",
-        "admin",
-        "",
-        &challenge,
+        &AuthorizeRequest {
+            scope: "admin",
+            state: "",
+            verifier,
+            ..AuthorizeRequest::read(&client_id)
+        },
+        &[],
     )
     .await;
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-        ],
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let auth_code = code_from_location(&location_header(&response));
+    assert_eq!(approval.status(), StatusCode::SEE_OTHER);
+    let auth_code = code_from_location(&location_header(&approval));
 
-    let response = exchange_code(
+    let token_json = exchange_ok(
         &app,
         &auth_code,
         &client_id,
@@ -737,8 +590,6 @@ async fn approve_drops_unknown_scopes_and_defaults_to_read() {
         verifier,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let token_json = body_to_json(response.into_body()).await;
     assert_eq!(token_json["scope"], "read");
     let access_token = token_json["access_token"].as_str().unwrap();
     assert_eq!(
@@ -751,74 +602,46 @@ async fn approve_drops_unknown_scopes_and_defaults_to_read() {
 
 #[tokio::test]
 async fn approve_without_pin_field_issues_no_code_when_pin_configured() {
-    let (app, _store) = build_test_router(Some("1234".into()));
+    let (app, _store) = build_test_router(Some("1234"));
     let client_id = register_client(&app, "http://localhost/cb").await;
-    let challenge = pkce::challenge_from_verifier("attacker-verifier");
 
     // The attacker reads the consent nonce straight out of the consent page.
-    let consent_nonce = authorize_nonce(
+    let response = approve_request(
         &app,
-        &client_id,
-        "http://localhost/cb",
-        "read write",
-        "s",
-        &challenge,
+        &AuthorizeRequest {
+            scope: "read write",
+            verifier: "attacker-verifier",
+            ..AuthorizeRequest::read(&client_id)
+        },
+        &[],
     )
     .await;
+    assert_no_code(&response, "no pin field");
+}
 
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-        ],
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let location = location_header(&response);
-    assert!(!location.contains("code="), "location: {location}");
+/// Asserts `response` redirects with `access_denied` and carries no code.
+fn assert_no_code(response: &Response, context: &str) {
+    assert_eq!(response.status(), StatusCode::SEE_OTHER, "{context}");
+    let location = location_header(response);
+    assert!(
+        !location.contains("code="),
+        "{context} location: {location}"
+    );
     assert!(
         location.contains("error=access_denied"),
-        "location: {location}"
+        "{context} location: {location}"
     );
 }
 
 #[tokio::test]
 async fn approve_against_empty_configured_pin_issues_no_code() {
-    let (app, _store) = build_test_router(Some(String::new()));
+    let (app, _store) = build_test_router(Some(""));
     let client_id = register_client(&app, "http://localhost/cb").await;
-    let challenge = pkce::challenge_from_verifier("verifier");
 
     // An empty `pin` field and an omitted one must both be refused.
     for pin in [Some(""), None] {
-        let consent_nonce = authorize_nonce(
-            &app,
-            &client_id,
-            "http://localhost/cb",
-            "read",
-            "s",
-            &challenge,
-        )
-        .await;
-        let mut fields = vec![
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-        ];
-        if let Some(pin) = pin {
-            fields.push(("pin", pin));
-        }
-
-        let response = post_approve(&app, &fields).await;
-        assert_eq!(response.status(), StatusCode::SEE_OTHER, "pin={pin:?}");
-        let location = location_header(&response);
-        assert!(
-            !location.contains("code="),
-            "pin={pin:?} location: {location}"
-        );
-        assert!(
-            location.contains("error=access_denied"),
-            "pin={pin:?} location: {location}"
-        );
+        let response = submit_consent(&app, &client_id, true, pin).await;
+        assert_no_code(&response, &format!("pin={pin:?}"));
     }
 }
 
@@ -832,17 +655,8 @@ async fn submit_consent(
     client_id: &str,
     approved: bool,
     pin: Option<&str>,
-) -> axum::response::Response {
-    let challenge = pkce::challenge_from_verifier("verifier");
-    let consent_nonce = authorize_nonce(
-        app,
-        client_id,
-        "http://localhost/cb",
-        "read",
-        "s",
-        &challenge,
-    )
-    .await;
+) -> Response {
+    let consent_nonce = authorize_nonce(app, &AuthorizeRequest::read(client_id)).await;
     let mut fields = vec![
         ("consent_nonce", consent_nonce.as_str()),
         ("approved", if approved { "true" } else { "false" }),
@@ -855,20 +669,15 @@ async fn submit_consent(
 
 /// Asserts `response` redirects with `access_denied` and `description`, and
 /// carries no code.
-fn assert_denied(response: &axum::response::Response, description: &str) {
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+fn assert_denied(response: &Response, description: &str) {
+    assert_no_code(response, description);
     let location = location_header(response);
-    assert!(!location.contains("code="), "location: {location}");
-    assert!(
-        location.contains("error=access_denied"),
-        "location: {location}"
-    );
     let encoded = urlencoding::encode(description).replace("%20", "+");
     assert!(location.contains(&encoded), "location: {location}");
 }
 
 /// Asserts `response` redirects with an authorization code.
-fn assert_code_issued(response: &axum::response::Response) {
+fn assert_code_issued(response: &Response) {
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let location = location_header(response);
     assert!(location.contains("code="), "location: {location}");
@@ -877,7 +686,7 @@ fn assert_code_issued(response: &axum::response::Response) {
 
 /// Asserts `response` is the backoff refusal: 429, a `Retry-After` of 1 to
 /// 60 seconds, `temporarily_unavailable`, and no redirect.
-async fn assert_backoff(response: axum::response::Response) {
+async fn assert_backoff(response: Response) {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(response.headers().get(header::LOCATION).is_none());
     let retry_after: u64 = response
@@ -908,47 +717,51 @@ fn backed_off_limiter() -> PinLimiter {
     limiter
 }
 
+/// Submits `pin` for `client_id` `times` times, asserting each is refused as
+/// an invalid PIN.
+async fn submit_wrong_pins(app: &Router, client_id: &str, pin: &str, times: usize) {
+    for _ in 0..times {
+        let response = submit_consent(app, client_id, true, Some(pin)).await;
+        assert_denied(&response, "Invalid PIN");
+    }
+}
+
 #[tokio::test]
 async fn approve_accepts_only_the_exact_pin() {
-    let (app, _store) = build_test_router(Some(LIMITED_PIN.into()));
+    let (app, _store) = build_test_router(Some(LIMITED_PIN));
     let client_id = register_client(&app, "http://localhost/cb").await;
 
     // Wrong, a prefix, longer, and empty: four failures, under the limit.
     for pin in ["wrong-horse!!", "correct", "correct-horse-battery", ""] {
-        let response = submit_consent(&app, &client_id, true, Some(pin)).await;
-        assert_denied(&response, "Invalid PIN");
+        submit_wrong_pins(&app, &client_id, pin, 1).await;
     }
-    let response = submit_consent(&app, &client_id, true, Some(LIMITED_PIN)).await;
-    assert_code_issued(&response);
+    let correct = submit_consent(&app, &client_id, true, Some(LIMITED_PIN)).await;
+    assert_code_issued(&correct);
     let response = submit_consent(&app, &client_id, true, None).await;
     assert_denied(&response, "Invalid PIN");
 }
 
 #[tokio::test]
 async fn five_wrong_pins_back_off_even_the_correct_pin() {
-    let (app, _store) = build_test_router(Some(LIMITED_PIN.into()));
+    let (app, _store) = build_test_router(Some(LIMITED_PIN));
     let client_id = register_client(&app, "http://localhost/cb").await;
 
-    for _ in 0..MAX_FAILURES {
-        let response = submit_consent(&app, &client_id, true, Some("wrong-pin")).await;
-        assert_denied(&response, "Invalid PIN");
-    }
-    let response = submit_consent(&app, &client_id, true, Some(LIMITED_PIN)).await;
-    assert_backoff(response).await;
+    submit_wrong_pins(&app, &client_id, "wrong-pin", MAX_FAILURES).await;
+    let correct = submit_consent(&app, &client_id, true, Some(LIMITED_PIN)).await;
+    assert_backoff(correct).await;
     let response = submit_consent(&app, &client_id, true, Some("wrong-pin")).await;
     assert_backoff(response).await;
 }
 
 #[tokio::test]
 async fn wrong_pins_from_different_clients_add_up() {
-    let (app, _store) = build_test_router(Some(LIMITED_PIN.into()));
+    let (app, _store) = build_test_router(Some(LIMITED_PIN));
     let first = register_client(&app, "http://localhost/cb").await;
     let second = register_client(&app, "http://localhost/cb").await;
     assert_ne!(first, second);
 
     for client_id in [&first, &second, &first, &second, &first] {
-        let response = submit_consent(&app, client_id, true, Some("wrong-pin")).await;
-        assert_denied(&response, "Invalid PIN");
+        submit_wrong_pins(&app, client_id, "wrong-pin", 1).await;
     }
     let response = submit_consent(&app, &second, true, Some(LIMITED_PIN)).await;
     assert_backoff(response).await;
@@ -956,14 +769,11 @@ async fn wrong_pins_from_different_clients_add_up() {
 
 #[tokio::test]
 async fn correct_pin_resets_the_failure_count() {
-    let (app, _store) = build_test_router(Some(LIMITED_PIN.into()));
+    let (app, _store) = build_test_router(Some(LIMITED_PIN));
     let client_id = register_client(&app, "http://localhost/cb").await;
 
     for _ in 0..2 {
-        for _ in 1..MAX_FAILURES {
-            let response = submit_consent(&app, &client_id, true, Some("wrong-pin")).await;
-            assert_denied(&response, "Invalid PIN");
-        }
+        submit_wrong_pins(&app, &client_id, "wrong-pin", MAX_FAILURES - 1).await;
         let response = submit_consent(&app, &client_id, true, Some(LIMITED_PIN)).await;
         assert_code_issued(&response);
     }
@@ -971,7 +781,7 @@ async fn correct_pin_resets_the_failure_count() {
 
 #[tokio::test]
 async fn denials_never_count_as_pin_failures() {
-    let (app, _store) = build_test_router(Some(LIMITED_PIN.into()));
+    let (app, _store) = build_test_router(Some(LIMITED_PIN));
     let client_id = register_client(&app, "http://localhost/cb").await;
 
     for pin in [Some("wrong-pin"), None, Some(LIMITED_PIN)]
@@ -988,12 +798,11 @@ async fn denials_never_count_as_pin_failures() {
 
 #[tokio::test]
 async fn denials_during_a_backoff_are_not_refused() {
-    let (app, _store) =
-        build_test_router_with_limiter(Some(LIMITED_PIN.into()), backed_off_limiter());
+    let (app, _store) = build_test_router_with_limiter(Some(LIMITED_PIN), backed_off_limiter());
     let client_id = register_client(&app, "http://localhost/cb").await;
 
-    let response = submit_consent(&app, &client_id, false, Some("wrong-pin")).await;
-    assert_denied(&response, "User denied the authorization request");
+    let denial = submit_consent(&app, &client_id, false, Some("wrong-pin")).await;
+    assert_denied(&denial, "User denied the authorization request");
     let response = submit_consent(&app, &client_id, true, Some(LIMITED_PIN)).await;
     assert_backoff(response).await;
 }
@@ -1068,34 +877,24 @@ async fn get_authorize(
     parameters: &str,
     client_id: &str,
     redirect_uri: &str,
-) -> axum::response::Response {
-    app.clone()
-        .oneshot(
-            Request::get(format!(
-                "/oauth/authorize?{parameters}&client_id={}&redirect_uri={}&state=xyz",
-                urlencoding::encode(client_id),
-                urlencoding::encode(redirect_uri),
-            ))
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap()
+) -> Response {
+    get_uri(
+        app,
+        &format!(
+            "/oauth/authorize?{parameters}&client_id={}&redirect_uri={}&state=xyz",
+            urlencoding::encode(client_id),
+            urlencoding::encode(redirect_uri),
+        ),
+    )
+    .await
 }
 
-#[tokio::test]
-async fn authorize_parameter_errors_never_redirect_to_unregistered_uri() {
-    let (app, _store) = build_test_router(None);
-    register_client(&app, "http://localhost/cb").await;
-
+/// Asserts each of [`AUTHORIZE_PARAMETER_ERRORS`] for `client_id` at the
+/// unregistered `https://evil.example/` is a 400 `invalid_request` naming the
+/// client or redirect mismatch, and never a redirect.
+async fn assert_parameter_errors_never_redirect_to_evil(app: &Router, client_id: &str) {
     for (parameters, _) in AUTHORIZE_PARAMETER_ERRORS {
-        let response = get_authorize(
-            &app,
-            parameters,
-            "myapp_cid_unregistered",
-            "https://evil.example/",
-        )
-        .await;
+        let response = get_authorize(app, parameters, client_id, "https://evil.example/").await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{parameters}");
         assert!(
             response.headers().get(header::LOCATION).is_none(),
@@ -1111,23 +910,19 @@ async fn authorize_parameter_errors_never_redirect_to_unregistered_uri() {
 }
 
 #[tokio::test]
+async fn authorize_parameter_errors_never_redirect_to_unregistered_uri() {
+    let (app, _store) = build_test_router(None);
+    register_client(&app, "http://localhost/cb").await;
+
+    assert_parameter_errors_never_redirect_to_evil(&app, "myapp_cid_unregistered").await;
+}
+
+#[tokio::test]
 async fn authorize_parameter_errors_never_redirect_to_uri_unregistered_for_known_client() {
     let (app, _store) = build_test_router(None);
     let client_id = register_client(&app, "http://localhost/cb").await;
 
-    for (parameters, _) in AUTHORIZE_PARAMETER_ERRORS {
-        let response = get_authorize(&app, parameters, &client_id, "https://evil.example/").await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{parameters}");
-        assert!(
-            response.headers().get(header::LOCATION).is_none(),
-            "{parameters} redirected"
-        );
-        let json = body_to_json(response.into_body()).await;
-        assert_eq!(
-            json["error_description"], "Unknown client_id or redirect_uri mismatch",
-            "{parameters}"
-        );
-    }
+    assert_parameter_errors_never_redirect_to_evil(&app, &client_id).await;
 }
 
 /// A query that does not deserialize is a JSON 400 `invalid_request`, never
@@ -1144,15 +939,7 @@ async fn authorize_with_malformed_parameters_never_redirects() {
         format!("response_type={MARKER}&redirect_uri=http%3A%2F%2Flocalhost%2Fcb"),
         format!("response_type=code&client_id={client_id}&state={MARKER}"),
     ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::get(format!("/oauth/authorize?{query}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = get_uri(&app, &format!("/oauth/authorize?{query}")).await;
         let body = assert_json_error_without_redirect(response, "invalid_request", &query).await;
         assert!(!body.contains(MARKER), "{query} echoed: {body}");
         assert!(!body.contains(&client_id), "{query} echoed: {body}");
@@ -1218,16 +1005,7 @@ const MALFORMED_BODIES: [(&str, &str, &str, &str); 8] = [
 async fn malformed_oauth_bodies_are_json_errors_without_echo() {
     let (app, store) = build_test_router(None);
     for (path, content_type, body, expected_error) in MALFORMED_BODIES {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::post(path)
-                    .header(header::CONTENT_TYPE, content_type)
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = post_body(&app, path, content_type, body.to_string()).await;
         let context = format!("{path} {content_type} {body}");
         let text = assert_json_error_without_redirect(response, expected_error, &context).await;
         assert!(
@@ -1241,7 +1019,7 @@ async fn malformed_oauth_bodies_are_json_errors_without_echo() {
 /// Asserts `response` is a JSON 400 carrying `expected_error` and no
 /// redirect, and returns the body text.
 async fn assert_json_error_without_redirect(
-    response: axum::response::Response,
+    response: Response,
     expected_error: &str,
     context: &str,
 ) -> String {
@@ -1287,19 +1065,14 @@ async fn authorize_is_not_an_open_redirector_for_a_registered_attacker_uri() {
         .await;
 }
 
+/// POST `/oauth/register` with `body` as JSON and return the response.
+async fn post_register_json(app: &Router, body: &serde_json::Value) -> Response {
+    post_body(app, "/oauth/register", "application/json", body.to_string()).await
+}
+
 /// POST `/oauth/register` with `redirect_uris` and return the response.
-async fn post_register(app: &Router, redirect_uris: &[&str]) -> axum::response::Response {
-    app.clone()
-        .oneshot(
-            Request::post("/oauth/register")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({ "redirect_uris": redirect_uris }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
+async fn post_register(app: &Router, redirect_uris: &[&str]) -> Response {
+    post_register_json(app, &serde_json::json!({ "redirect_uris": redirect_uris })).await
 }
 
 #[tokio::test]
@@ -1384,16 +1157,15 @@ async fn registration_refuses_disallowed_redirect_uris_and_stores_no_client() {
     assert!(failures.is_empty(), "not refused:\n{}", failures.join("\n"));
 }
 
+/// Just over the 24 hours a client may sit unused.
+const PAST_CLIENT_IDLE_TTL: Duration = Duration::from_secs(24 * 60 * 60 + 1);
+
 #[tokio::test]
 async fn registration_over_the_client_cap_is_429_until_a_client_expires() {
-    let (app, store) = build_test_router_with(
-        None,
-        PinLimiter::default(),
-        OAuthStoreConfig {
-            max_clients: 2,
-            ..OAuthStoreConfig::default()
-        },
-    );
+    let (app, store) = build_test_router_with_store(OAuthStoreConfig {
+        max_clients: 2,
+        ..OAuthStoreConfig::default()
+    });
     let first = register_client(&app, "http://localhost/cb").await;
     register_client(&app, "http://localhost/cb").await;
 
@@ -1406,7 +1178,7 @@ async fn registration_over_the_client_cap_is_429_until_a_client_expires() {
     assert_eq!(store.client_count(), 2);
 
     // A client unused for a day no longer counts against the cap.
-    store.backdate_client(&first, Duration::from_secs(24 * 60 * 60 + 1));
+    store.backdate_client(&first, PAST_CLIENT_IDLE_TTL);
     register_client(&app, "http://localhost/cb").await;
     assert!(!store.has_client(&first));
     assert_eq!(store.client_count(), 2);
@@ -1416,7 +1188,7 @@ async fn registration_over_the_client_cap_is_429_until_a_client_expires() {
 async fn sweep_drops_unused_client_so_authorize_refuses_it() {
     let (app, store) = build_test_router(None);
     let client_id = register_client(&app, "http://localhost/cb").await;
-    store.backdate_client(&client_id, Duration::from_secs(24 * 60 * 60 + 1));
+    store.backdate_client(&client_id, PAST_CLIENT_IDLE_TTL);
     store.sweep_expired();
 
     let response = get_authorize(
@@ -1434,22 +1206,15 @@ async fn post_register_named(
     app: &Router,
     client_name: &str,
     redirect_uris: &[String],
-) -> axum::response::Response {
-    app.clone()
-        .oneshot(
-            Request::post("/oauth/register")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "client_name": client_name,
-                        "redirect_uris": redirect_uris,
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
+) -> Response {
+    post_register_json(
+        app,
+        &serde_json::json!({
+            "client_name": client_name,
+            "redirect_uris": redirect_uris,
+        }),
+    )
+    .await
 }
 
 /// `https://example.com/` plus a path that makes it exactly `bytes` long.
@@ -1461,18 +1226,23 @@ fn redirect_uri_of_len(bytes: usize) -> String {
     )
 }
 
+/// `count` distinct `https://example.com/cb{index}` redirect URIs.
+fn numbered_redirect_uris(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|index| format!("https://example.com/cb{index}"))
+        .collect()
+}
+
 #[tokio::test]
 async fn registration_accepts_metadata_at_its_size_limits() {
     let (app, store) = build_test_router(None);
-    let uris: Vec<String> = (0..10)
-        .map(|index| format!("https://example.com/cb{index}"))
-        .collect();
-    let response = post_register_named(&app, &"n".repeat(256), &uris).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
+    let uris = numbered_redirect_uris(10);
+    let ascii_name = post_register_named(&app, &"n".repeat(256), &uris).await;
+    assert_eq!(ascii_name.status(), StatusCode::CREATED);
 
     // 256 characters, counted as characters: 512 bytes.
-    let response = post_register_named(&app, &"é".repeat(256), &uris[..1]).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
+    let multibyte_name = post_register_named(&app, &"é".repeat(256), &uris[..1]).await;
+    assert_eq!(multibyte_name.status(), StatusCode::CREATED);
 
     let response = post_register_named(&app, "n", &[redirect_uri_of_len(2048)]).await;
     assert_eq!(response.status(), StatusCode::CREATED);
@@ -1481,13 +1251,10 @@ async fn registration_accepts_metadata_at_its_size_limits() {
 
 #[tokio::test]
 async fn registration_refuses_metadata_over_its_size_limits_and_stores_nothing() {
-    let eleven: Vec<String> = (0..11)
-        .map(|index| format!("https://example.com/cb{index}"))
-        .collect();
     let one = vec!["https://example.com/cb".to_string()];
     let cases: [(String, Vec<String>, &str); 3] = [
         ("n".repeat(257), one, "client_name"),
-        ("n".to_string(), eleven, "redirect_uris"),
+        ("n".to_string(), numbered_redirect_uris(11), "redirect_uris"),
         (
             "n".to_string(),
             vec![redirect_uri_of_len(2049)],
@@ -1512,21 +1279,18 @@ async fn authorize_with(
     client_id: &str,
     code_challenge: &str,
     state: &str,
-) -> axum::response::Response {
-    app.clone()
-        .oneshot(
-            Request::get(format!(
-                "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
-                urlencoding::encode(client_id),
-                urlencoding::encode("http://localhost/cb"),
-                urlencoding::encode(state),
-                urlencoding::encode(code_challenge),
-            ))
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap()
+) -> Response {
+    get_uri(
+        app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
+            urlencoding::encode(client_id),
+            urlencoding::encode("http://localhost/cb"),
+            urlencoding::encode(state),
+            urlencoding::encode(code_challenge),
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -1596,18 +1360,24 @@ async fn authorize_ok(app: &Router, client_id: &str) -> String {
     consent_nonce(&body_to_string(response.into_body()).await)
 }
 
+/// Asserts approving the `evicted` nonce is refused, and approving each of
+/// `kept` issues a code.
+async fn assert_only_evicted_nonce_refused(app: &Router, evicted: &str, kept: &[String]) {
+    assert_bad_nonce(approve_nonce(app, evicted, &[]).await).await;
+    for nonce in kept {
+        let response = approve_nonce(app, nonce, &[]).await;
+        assert_code_issued(&response);
+    }
+}
+
 /// Past the per-client cap `/oauth/authorize` still succeeds, evicting that
 /// client's oldest request, whose nonce is then refused at approve.
 #[tokio::test]
 async fn authorize_past_the_per_client_cap_evicts_that_clients_oldest() {
-    let (app, store) = build_test_router_with(
-        None,
-        PinLimiter::default(),
-        OAuthStoreConfig {
-            max_pending_per_client: 2,
-            ..OAuthStoreConfig::default()
-        },
-    );
+    let (app, store) = build_test_router_with_store(OAuthStoreConfig {
+        max_pending_per_client: 2,
+        ..OAuthStoreConfig::default()
+    });
     let flooder = register_client(&app, "http://localhost/cb").await;
     let victim = register_client(&app, "http://localhost/cb").await;
     let victim_nonce = authorize_ok(&app, &victim).await;
@@ -1618,36 +1388,17 @@ async fn authorize_past_the_per_client_cap_evicts_that_clients_oldest() {
     let newest = authorize_ok(&app, &flooder).await;
     assert!(store.holds_authorization(&victim_nonce));
 
-    assert_bad_nonce(
-        post_approve(
-            &app,
-            &[("consent_nonce", oldest.as_str()), ("approved", "true")],
-        )
-        .await,
-    )
-    .await;
-    for nonce in [newest, victim_nonce] {
-        let response = post_approve(
-            &app,
-            &[("consent_nonce", nonce.as_str()), ("approved", "true")],
-        )
-        .await;
-        assert_code_issued(&response);
-    }
+    assert_only_evicted_nonce_refused(&app, &oldest, &[newest, victim_nonce]).await;
 }
 
 /// Past the global cap `/oauth/authorize` still succeeds, evicting the
 /// oldest request of all, whose nonce is then refused at approve.
 #[tokio::test]
 async fn authorize_past_the_global_cap_evicts_the_oldest() {
-    let (app, _store) = build_test_router_with(
-        None,
-        PinLimiter::default(),
-        OAuthStoreConfig {
-            max_pending_authorizations: 2,
-            ..OAuthStoreConfig::default()
-        },
-    );
+    let (app, _store) = build_test_router_with_store(OAuthStoreConfig {
+        max_pending_authorizations: 2,
+        ..OAuthStoreConfig::default()
+    });
     let mut clients = Vec::new();
     for _ in 0..3 {
         clients.push(register_client(&app, "http://localhost/cb").await);
@@ -1657,22 +1408,15 @@ async fn authorize_past_the_global_cap_evicts_the_oldest() {
         nonces.push(authorize_ok(&app, client_id).await);
     }
 
-    assert_bad_nonce(
-        post_approve(
-            &app,
-            &[("consent_nonce", nonces[0].as_str()), ("approved", "true")],
-        )
-        .await,
-    )
-    .await;
-    for nonce in &nonces[1..] {
-        let response = post_approve(
-            &app,
-            &[("consent_nonce", nonce.as_str()), ("approved", "true")],
-        )
-        .await;
-        assert_code_issued(&response);
-    }
+    assert_only_evicted_nonce_refused(&app, &nonces[0], &nonces[1..]).await;
+}
+
+/// Registers a client for `http://localhost/cb` and returns it with a consent
+/// nonce from a `read` authorization.
+async fn registered_consent_nonce(app: &Router) -> (String, String) {
+    let client_id = register_client(app, "http://localhost/cb").await;
+    let consent_nonce = authorize_nonce(app, &AuthorizeRequest::read(&client_id)).await;
+    (client_id, consent_nonce)
 }
 
 /// The consent nonce names only the client; once the client is gone the
@@ -1680,27 +1424,10 @@ async fn authorize_past_the_global_cap_evicts_the_oldest() {
 #[tokio::test]
 async fn consent_nonce_for_a_removed_client_is_refused() {
     let (app, store) = build_test_router(None);
-    let client_id = register_client(&app, "http://localhost/cb").await;
-    let challenge = pkce::challenge_from_verifier("verifier");
-    let consent_nonce = authorize_nonce(
-        &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "s",
-        &challenge,
-    )
-    .await;
+    let (client_id, consent_nonce) = registered_consent_nonce(&app).await;
     store.forget_client(&client_id);
 
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-        ],
-    )
-    .await;
+    let response = approve_nonce(&app, &consent_nonce, &[]).await;
     assert_bad_nonce(response).await;
 }
 
@@ -1709,11 +1436,17 @@ async fn redirects_keep_query_already_on_registered_uri() {
     const REDIRECT_URI: &str = "http://localhost/cb?app=1";
     let (app, _store) = build_test_router(None);
     let client_id = register_client(&app, REDIRECT_URI).await;
-    let challenge = pkce::challenge_from_verifier("verifier");
 
     for (approved, expected_key) in [("true", "code"), ("false", "error")] {
-        let consent_nonce =
-            authorize_nonce(&app, &client_id, REDIRECT_URI, "read", "s t&u", &challenge).await;
+        let consent_nonce = authorize_nonce(
+            &app,
+            &AuthorizeRequest {
+                redirect_uri: REDIRECT_URI,
+                state: "s t&u",
+                ..AuthorizeRequest::read(&client_id)
+            },
+        )
+        .await;
         let response = post_approve(
             &app,
             &[
@@ -1729,11 +1462,7 @@ async fn redirects_keep_query_already_on_registered_uri() {
         );
         let location = location_header(&response);
         assert_eq!(location.matches('?').count(), 1, "{location}");
-        let query: Vec<(String, String)> = url::Url::parse(&location)
-            .unwrap()
-            .query_pairs()
-            .into_owned()
-            .collect();
+        let query = query_pairs(&location);
         assert!(query.contains(&("app".into(), "1".into())), "{location}");
         assert!(
             query.iter().any(|(key, _)| key == expected_key),
@@ -1753,29 +1482,20 @@ async fn redirect_encodes_a_hostile_state() {
     const HOSTILE_STATE: &str = "x&code=forged#frag";
     let (app, _store) = build_test_router(None);
     let client_id = register_client(&app, "http://localhost/cb").await;
-    let challenge = pkce::challenge_from_verifier("verifier");
 
-    let consent_nonce = authorize_nonce(
+    let response = approve_request(
         &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        HOSTILE_STATE,
-        &challenge,
-    )
-    .await;
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-        ],
+        &AuthorizeRequest {
+            state: HOSTILE_STATE,
+            ..AuthorizeRequest::read(&client_id)
+        },
+        &[],
     )
     .await;
     let location = location_header(&response);
     let redirect = url::Url::parse(&location).unwrap();
     assert!(redirect.fragment().is_none(), "{location}");
-    let query: Vec<(String, String)> = redirect.query_pairs().into_owned().collect();
+    let query = query_pairs(&location);
     assert_eq!(
         query.iter().filter(|(key, _)| key == "code").count(),
         1,
@@ -1799,26 +1519,25 @@ async fn registered_uri_that_url_reserialises_still_exchanges() {
     let (app, _store) = build_test_router(None);
     let client_id = register_client(&app, REDIRECT_URI).await;
     let verifier = "verifier-that-is-long-enough-for-pkce-checks";
-    let challenge = pkce::challenge_from_verifier(verifier);
 
-    let consent_nonce =
-        authorize_nonce(&app, &client_id, REDIRECT_URI, "read", "s", &challenge).await;
-    let response = post_approve(
+    let approval = approve_request(
         &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-        ],
+        &AuthorizeRequest {
+            redirect_uri: REDIRECT_URI,
+            verifier,
+            ..AuthorizeRequest::read(&client_id)
+        },
+        &[],
     )
     .await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let location = location_header(&response);
+    assert_eq!(approval.status(), StatusCode::SEE_OTHER);
+    let location = location_header(&approval);
     assert!(
         location.starts_with("http://localhost:3000/?"),
         "{location}"
     );
 
-    let response = exchange_code(
+    let json = exchange_ok(
         &app,
         &code_from_location(&location),
         &client_id,
@@ -1826,40 +1545,19 @@ async fn registered_uri_that_url_reserialises_still_exchanges() {
         verifier,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_to_json(response.into_body()).await;
     assert!(json["access_token"].is_string(), "{json}");
 }
 
 /// Register a client named `client_name` for `redirect_uris` and return its
 /// `client_id`.
 async fn register_named_client(app: &Router, client_name: &str, redirect_uris: &[&str]) -> String {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/oauth/register")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "client_name": client_name,
-                        "redirect_uris": redirect_uris,
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    body_to_json(response.into_body()).await["client_id"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    let redirect_uris: Vec<String> = redirect_uris.iter().map(ToString::to_string).collect();
+    client_id_of_registration(post_register_named(app, client_name, &redirect_uris).await).await
 }
 
 /// Asserts `response` is the bad-nonce refusal: 403, `invalid_request`, and
 /// no redirect, so no code.
-async fn assert_bad_nonce(response: axum::response::Response) {
+async fn assert_bad_nonce(response: Response) {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(response.headers().get(header::LOCATION).is_none());
     let json = body_to_json(response.into_body()).await;
@@ -1878,25 +1576,18 @@ async fn approval_grants_only_what_authorize_validated() {
     .await;
     let other_client_id = register_client(&app, "http://localhost/other").await;
     let verifier = "original-verifier-that-is-long-enough-for-pkce";
-    let challenge = pkce::challenge_from_verifier(verifier);
     let forged_challenge =
         pkce::challenge_from_verifier("forged-verifier-that-is-long-enough-for-pkce");
 
-    let consent_nonce = authorize_nonce(
-        &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "original-state",
-        &challenge,
-    )
-    .await;
     // Every authorize parameter posted again, each one different.
-    let response = post_approve(
+    let approval = approve_request(
         &app,
+        &AuthorizeRequest {
+            state: "original-state",
+            verifier,
+            ..AuthorizeRequest::read(&client_id)
+        },
         &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
             ("client_id", other_client_id.as_str()),
             ("redirect_uri", "http://localhost/other"),
             ("scope", "write"),
@@ -1907,21 +1598,20 @@ async fn approval_grants_only_what_authorize_validated() {
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let location = location_header(&response);
+    assert_eq!(approval.status(), StatusCode::SEE_OTHER);
+    let location = location_header(&approval);
     let redirect = url::Url::parse(&location).unwrap();
     assert_eq!(
         &redirect[..url::Position::AfterPath],
         "http://localhost/cb",
         "{location}"
     );
-    let query: Vec<(String, String)> = redirect.query_pairs().into_owned().collect();
     assert!(
-        query.contains(&("state".into(), "original-state".into())),
+        query_pairs(&location).contains(&("state".into(), "original-state".into())),
         "{location}"
     );
 
-    let response = exchange_code(
+    let json = exchange_ok(
         &app,
         &code_from_location(&location),
         &client_id,
@@ -1929,8 +1619,6 @@ async fn approval_grants_only_what_authorize_validated() {
         verifier,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_to_json(response.into_body()).await;
     assert_eq!(json["scope"], "read");
 }
 
@@ -1938,19 +1626,10 @@ async fn approval_grants_only_what_authorize_validated() {
 async fn consent_nonce_is_spent_by_its_first_use() {
     let (app, _store) = build_test_router(None);
     let client_id = register_client(&app, "http://localhost/cb").await;
-    let challenge = pkce::challenge_from_verifier("verifier");
 
     for first_decision in ["true", "false"] {
-        let consent_nonce = authorize_nonce(
-            &app,
-            &client_id,
-            "http://localhost/cb",
-            "read",
-            "s",
-            &challenge,
-        )
-        .await;
-        let response = post_approve(
+        let consent_nonce = authorize_nonce(&app, &AuthorizeRequest::read(&client_id)).await;
+        let first_use = post_approve(
             &app,
             &[
                 ("consent_nonce", consent_nonce.as_str()),
@@ -1958,16 +1637,13 @@ async fn consent_nonce_is_spent_by_its_first_use() {
             ],
         )
         .await;
-        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{first_decision}");
+        assert_eq!(
+            first_use.status(),
+            StatusCode::SEE_OTHER,
+            "{first_decision}"
+        );
 
-        let response = post_approve(
-            &app,
-            &[
-                ("consent_nonce", consent_nonce.as_str()),
-                ("approved", "true"),
-            ],
-        )
-        .await;
+        let response = approve_nonce(&app, &consent_nonce, &[]).await;
         assert_bad_nonce(response).await;
     }
 }
@@ -1976,108 +1652,57 @@ async fn consent_nonce_is_spent_by_its_first_use() {
 /// `/oauth/authorize`.
 #[tokio::test]
 async fn consent_nonce_is_spent_by_a_wrong_pin() {
-    let (app, _store) = build_test_router(Some(LIMITED_PIN.into()));
-    let client_id = register_client(&app, "http://localhost/cb").await;
-    let challenge = pkce::challenge_from_verifier("verifier");
-    let consent_nonce = authorize_nonce(
-        &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "s",
-        &challenge,
-    )
-    .await;
+    let (app, _store) = build_test_router(Some(LIMITED_PIN));
+    let (_client_id, consent_nonce) = registered_consent_nonce(&app).await;
 
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-            ("pin", "wrong-pin"),
-        ],
-    )
-    .await;
-    assert_denied(&response, "Invalid PIN");
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-            ("pin", LIMITED_PIN),
-        ],
-    )
-    .await;
+    let wrong_pin = approve_nonce(&app, &consent_nonce, &[("pin", "wrong-pin")]).await;
+    assert_denied(&wrong_pin, "Invalid PIN");
+    let response = approve_nonce(&app, &consent_nonce, &[("pin", LIMITED_PIN)]).await;
     assert_bad_nonce(response).await;
 }
 
 #[tokio::test]
 async fn consent_nonce_past_its_ttl_is_refused() {
-    let (app, _store) = build_test_router_with(
-        None,
-        PinLimiter::default(),
-        OAuthStoreConfig {
-            csrf_nonce_ttl: Duration::ZERO,
-            ..OAuthStoreConfig::default()
-        },
-    );
-    let client_id = register_client(&app, "http://localhost/cb").await;
-    let challenge = pkce::challenge_from_verifier("verifier");
-    let consent_nonce = authorize_nonce(
-        &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "s",
-        &challenge,
-    )
-    .await;
+    let (app, _store) = build_test_router_with_store(OAuthStoreConfig {
+        csrf_nonce_ttl: Duration::ZERO,
+        ..OAuthStoreConfig::default()
+    });
+    let (_client_id, consent_nonce) = registered_consent_nonce(&app).await;
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-        ],
-    )
-    .await;
+    let response = approve_nonce(&app, &consent_nonce, &[]).await;
     assert_bad_nonce(response).await;
 }
 
 #[tokio::test]
 async fn unknown_consent_nonce_is_refused() {
     let (app, _store) = build_test_router(None);
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", "myapp_consent_unknown"),
-            ("approved", "true"),
-        ],
-    )
-    .await;
+    let response = approve_nonce(&app, "myapp_consent_unknown", &[]).await;
     assert_bad_nonce(response).await;
 }
 
 /// Strings that would mean the consent page reads its own URL.
 const URL_READING_SCRIPT: [&str; 3] = ["URLSearchParams", "window.location", "location.search"];
 
+/// Asserts `html` has no script that reads the page's own URL.
+fn assert_reads_no_url(html: &str) {
+    for script in URL_READING_SCRIPT {
+        assert!(!html.contains(script), "page contains {script}");
+    }
+}
+
 #[tokio::test]
 async fn consent_page_renders_the_pending_authorization() {
     let (app, _store) = build_test_router(None);
     let client_id =
         register_named_client(&app, "Consent Client", &["https://consent.example/cb"]).await;
-    let challenge = pkce::challenge_from_verifier("verifier");
+    let request = AuthorizeRequest {
+        redirect_uri: "https://consent.example/cb",
+        scope: "read write",
+        ..AuthorizeRequest::read(&client_id)
+    };
 
-    let html = authorize_page(
-        &app,
-        &client_id,
-        "https://consent.example/cb",
-        "read write",
-        "s",
-        &challenge,
-    )
-    .await;
+    let html = authorize_page(&app, &request).await;
     assert!(html.contains("Consent Client"), "{html}");
     assert!(html.contains(&client_id), "{html}");
     assert!(html.contains("consent.example"), "{html}");
@@ -2085,42 +1710,46 @@ async fn consent_page_renders_the_pending_authorization() {
     assert!(html.contains("Read and write access to the API"), "{html}");
     assert!(!html.contains("name=\"pin\""), "{html}");
     assert!(!html.contains("[["), "unfilled placeholder: {html}");
-    for script in URL_READING_SCRIPT {
-        assert!(!html.contains(script), "page contains {script}");
-    }
+    assert_reads_no_url(&html);
 
     // Unknown scopes are dropped, and `read` is granted when none are left.
-    let html = authorize_page(
+    let read_only_html = authorize_page(
         &app,
-        &client_id,
-        "https://consent.example/cb",
-        "admin",
-        "s",
-        &challenge,
+        &AuthorizeRequest {
+            scope: "admin",
+            ..request
+        },
     )
     .await;
-    assert!(html.contains("Read-only access to the API"), "{html}");
-    assert!(!html.contains("Read and write access to the API"), "{html}");
-    assert!(!html.contains("admin"), "{html}");
+    assert!(
+        read_only_html.contains("Read-only access to the API"),
+        "{read_only_html}"
+    );
+    assert!(
+        !read_only_html.contains("Read and write access to the API"),
+        "{read_only_html}"
+    );
+    assert!(!read_only_html.contains("admin"), "{read_only_html}");
+}
+
+/// Registers a client for `redirect_uri` on a router with `oauth_pin` and
+/// returns the consent page for a `read` authorization in `state` there.
+async fn consent_page_for(oauth_pin: Option<&str>, redirect_uri: &str, state: &str) -> String {
+    let (app, _store) = build_test_router(oauth_pin);
+    let client_id = register_client(&app, redirect_uri).await;
+    let request = AuthorizeRequest {
+        redirect_uri,
+        state,
+        ..AuthorizeRequest::read(&client_id)
+    };
+    authorize_page(&app, &request).await
 }
 
 /// The page carries the nonce and the decision, and none of the request's
 /// own parameters for the form to post back.
 #[tokio::test]
 async fn consent_form_posts_back_only_the_nonce_decision_and_pin() {
-    let (app, _store) = build_test_router(Some(LIMITED_PIN.into()));
-    let client_id = register_client(&app, "http://localhost/cb").await;
-    let challenge = pkce::challenge_from_verifier("verifier");
-
-    let html = authorize_page(
-        &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "state-value",
-        &challenge,
-    )
-    .await;
+    let html = consent_page_for(Some(LIMITED_PIN), "http://localhost/cb", "state-value").await;
     let names: Vec<&str> = html
         .split("name=\"")
         .skip(1)
@@ -2128,44 +1757,26 @@ async fn consent_form_posts_back_only_the_nonce_decision_and_pin() {
         .filter(|name| *name != "viewport")
         .collect();
     assert_eq!(names, ["consent_nonce", "approved", "pin"], "{html}");
+    let challenge = pkce::challenge_from_verifier("verifier");
     assert!(!html.contains(&challenge), "{html}");
     assert!(!html.contains("state-value"), "{html}");
 }
 
 #[tokio::test]
 async fn consent_page_renders_the_pin_field_only_when_a_pin_is_configured() {
-    let (app, _store) = build_test_router(Some("1234".into()));
-    let client_id = register_client(&app, "http://localhost/cb").await;
-    let challenge = pkce::challenge_from_verifier("verifier");
-
-    let html = authorize_page(
-        &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "s",
-        &challenge,
-    )
-    .await;
+    let html = consent_page_for(Some("1234"), "http://localhost/cb", "s").await;
     assert!(html.contains("name=\"pin\""), "{html}");
 }
 
 #[tokio::test]
 async fn consent_page_escapes_what_it_renders() {
-    const REDIRECT_URI: &str = "https://a\"b'c&d.example/cb";
-    let (app, _store) = build_test_router(None);
-    let client_id = register_client(&app, REDIRECT_URI).await;
-    let challenge = pkce::challenge_from_verifier("verifier");
-
-    let html = authorize_page(&app, &client_id, REDIRECT_URI, "read", "s", &challenge).await;
+    let html = consent_page_for(None, "https://a\"b'c&d.example/cb", "s").await;
     assert!(
         html.contains("a&quot;b&#x27;c&amp;d.example"),
         "host not escaped: {html}"
     );
     assert!(!html.contains("a\"b'c&d.example"), "{html}");
-    for script in URL_READING_SCRIPT {
-        assert!(!html.contains(script), "page contains {script}");
-    }
+    assert_reads_no_url(&html);
 }
 
 #[tokio::test]
@@ -2173,17 +1784,8 @@ async fn consent_page_escapes_the_client_name() {
     const CLIENT_NAME: &str = "<img src=x onerror=\"alert('x')\">&[[consent_nonce]]";
     let (app, _store) = build_test_router(None);
     let client_id = register_named_client(&app, CLIENT_NAME, &["http://localhost/cb"]).await;
-    let challenge = pkce::challenge_from_verifier("verifier");
 
-    let html = authorize_page(
-        &app,
-        &client_id,
-        "http://localhost/cb",
-        "read",
-        "s",
-        &challenge,
-    )
-    .await;
+    let html = authorize_page(&app, &AuthorizeRequest::read(&client_id)).await;
     assert!(
         html.contains(
             "&lt;img src=x onerror=&quot;alert(&#x27;x&#x27;)&quot;&gt;&amp;[[consent_nonce]]"
@@ -2198,21 +1800,21 @@ async fn consent_page_escapes_a_hostless_redirect_uri() {
     // An opaque URI has no host, so the page shows the whole URI. `url::Url`
     // keeps `<`, `>` and `"` in its path, so `html_escape` is all that stops
     // them from reaching the page as markup.
-    const REDIRECT_URI: &str = "myapp:<script>alert(\"x\")</script>";
-    let (app, _store) = build_test_router(None);
-    let client_id = register_client(&app, REDIRECT_URI).await;
-    let challenge = pkce::challenge_from_verifier("verifier");
-
-    let html = authorize_page(&app, &client_id, REDIRECT_URI, "read", "s", &challenge).await;
+    let html = consent_page_for(None, "myapp:<script>alert(\"x\")</script>", "s").await;
     assert!(html.contains("&lt;script&gt;"), "{html}");
     assert!(html.contains("&quot;x&quot;"), "{html}");
     assert!(!html.contains("<script>alert"), "{html}");
 }
 
+/// Has `store` issue client `cid` a `read` access token.
+fn issue_read_token(store: &OAuthStore) -> AccessToken {
+    store.create_access_token("cid".into(), vec!["read".into()])
+}
+
 #[tokio::test]
 async fn refresh_token_older_than_thirty_days_is_invalid_grant() {
     let (app, test_store) = build_test_router(None);
-    let access_token = test_store.create_access_token("cid".into(), vec!["read".into()]);
+    let access_token = issue_read_token(&test_store);
     test_store.backdate_refresh_token(
         &access_token.refresh_token,
         Duration::from_secs(30 * 24 * 60 * 60 + 1),
@@ -2225,48 +1827,38 @@ async fn refresh_token_older_than_thirty_days_is_invalid_grant() {
 /// An expired, swept access token does not take its refresh token with it.
 #[tokio::test]
 async fn refresh_succeeds_after_the_access_token_expires_and_is_swept() {
-    let (app, test_store) = build_test_router_with(
-        None,
-        PinLimiter::default(),
-        OAuthStoreConfig {
-            token_expiry_secs: 0,
-            ..OAuthStoreConfig::default()
-        },
-    );
-    let issued = test_store.create_access_token("cid".into(), vec!["read".into()]);
+    let (app, test_store) = build_test_router_with_store(OAuthStoreConfig {
+        token_expiry_secs: 0,
+        ..OAuthStoreConfig::default()
+    });
+    let issued = issue_read_token(&test_store);
     tokio::time::sleep(Duration::from_millis(10)).await;
     test_store.sweep_expired();
     assert!(test_store.validate_access_token(&issued.token).is_none());
 
-    let response = post_refresh(&app, &issued.refresh_token, &[("client_id", "cid")]).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_to_json(response.into_body()).await;
+    let json = refresh_ok(&app, &issued.refresh_token, "cid").await;
     assert!(json["access_token"].is_string(), "{json}");
 }
 
 /// POST a `refresh_token` grant for `refresh_token`, adding `extra` fields.
-async fn post_refresh(
-    app: &Router,
-    refresh_token: &str,
-    extra: &[(&str, &str)],
-) -> axum::response::Response {
+async fn post_refresh(app: &Router, refresh_token: &str, extra: &[(&str, &str)]) -> Response {
     let mut fields = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
     ];
     fields.extend_from_slice(extra);
-    app.clone()
-        .oneshot(
-            Request::post("/oauth/token")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(serde_urlencoded::to_string(fields).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
+    post_form(app, "/oauth/token", &fields).await
 }
 
-async fn assert_invalid_grant(response: axum::response::Response) {
+/// Refresh `refresh_token` as `client_id`, asserting a 200, and return the
+/// token JSON.
+async fn refresh_ok(app: &Router, refresh_token: &str, client_id: &str) -> serde_json::Value {
+    let response = post_refresh(app, refresh_token, &[("client_id", client_id)]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    body_to_json(response.into_body()).await
+}
+
+async fn assert_invalid_grant(response: Response) {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let json = body_to_json(response.into_body()).await;
     assert_eq!(json["error"], "invalid_grant", "{json}");
@@ -2276,7 +1868,7 @@ async fn assert_invalid_grant(response: axum::response::Response) {
 /// gets `invalid_grant` for it too.
 async fn assert_refused_and_consumed(extra: &[(&str, &str)]) {
     let (app, test_store) = build_test_router(None);
-    let issued = test_store.create_access_token("cid".into(), vec!["read".into()]);
+    let issued = issue_read_token(&test_store);
 
     assert_invalid_grant(post_refresh(&app, &issued.refresh_token, extra).await).await;
     assert_invalid_grant(post_refresh(&app, &issued.refresh_token, &[("client_id", "cid")]).await)
@@ -2286,11 +1878,9 @@ async fn assert_refused_and_consumed(extra: &[(&str, &str)]) {
 #[tokio::test]
 async fn refresh_with_issuing_client_id_returns_a_new_pair() {
     let (app, test_store) = build_test_router(None);
-    let issued = test_store.create_access_token("cid".into(), vec!["read".into()]);
+    let issued = issue_read_token(&test_store);
 
-    let response = post_refresh(&app, &issued.refresh_token, &[("client_id", "cid")]).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_to_json(response.into_body()).await;
+    let json = refresh_ok(&app, &issued.refresh_token, "cid").await;
     assert_ne!(json["access_token"], issued.token.as_str());
     assert_ne!(json["refresh_token"], issued.refresh_token.as_str());
     assert_eq!(json["scope"], "read");
@@ -2318,7 +1908,7 @@ async fn refresh_with_empty_client_id_is_invalid_grant_and_consumes_the_token() 
 #[tokio::test]
 async fn refresh_client_mismatch_body_matches_unknown_refresh_token_body() {
     let (app, test_store) = build_test_router(None);
-    let issued = test_store.create_access_token("cid".into(), vec!["read".into()]);
+    let issued = issue_read_token(&test_store);
 
     let mismatch = post_refresh(&app, &issued.refresh_token, &[("client_id", "other")]).await;
     assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
@@ -2424,6 +2014,16 @@ impl Drop for LogCapture {
     }
 }
 
+/// Issues a `read` token for `cid` on a fresh router and asserts refreshing
+/// it as `other` is `invalid_grant`. Returns the issued token.
+async fn refuse_refresh_from_other_client() -> AccessToken {
+    let (app, test_store) = build_test_router(None);
+    let issued = issue_read_token(&test_store);
+    let refused = post_refresh(&app, &issued.refresh_token, &[("client_id", "other")]).await;
+    assert_invalid_grant(refused).await;
+    issued
+}
+
 /// A refused refresh logs a `WARN` naming both clients and never a token.
 ///
 /// Root cause of this test's old flakiness under plain `cargo test` (it passed
@@ -2454,23 +2054,12 @@ async fn refresh_client_mismatch_warns_with_both_client_ids_and_no_token() {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
-            .block_on(async {
-                let (app, test_store) = build_test_router(None);
-                let issued = test_store.create_access_token("cid".into(), vec!["read".into()]);
-                let refused =
-                    post_refresh(&app, &issued.refresh_token, &[("client_id", "other")]).await;
-                assert_invalid_grant(refused).await;
-            });
+            .block_on(refuse_refresh_from_other_client());
     })
     .join()
     .unwrap();
 
-    let (app, test_store) = build_test_router(None);
-    let issued = test_store.create_access_token("cid".into(), vec!["read".into()]);
-    assert_invalid_grant(
-        post_refresh(&app, &issued.refresh_token, &[("client_id", "other")]).await,
-    )
-    .await;
+    let issued = refuse_refresh_from_other_client().await;
 
     let output = logs.output();
     let warning = output
@@ -2494,38 +2083,26 @@ const LOGGED_UNKNOWN_BEARER: &str = "myapp_at_unknown-49382716";
 #[tokio::test]
 async fn tracing_output_never_contains_tokens_codes_or_the_pin() {
     let logs = LogCapture::start();
-    let (app, _store) = build_test_router(Some(LIMITED_PIN.into()));
+    let (app, _store) = build_test_router(Some(LIMITED_PIN));
     let client_id = register_named_client(&app, "Logged Client", &["http://localhost/cb"]).await;
     let verifier = "log-capture-verifier-that-is-long-enough-for-pkce";
-    let challenge = pkce::challenge_from_verifier(verifier);
 
     // A wrong PIN, then the right one.
-    let response = submit_consent(&app, &client_id, true, Some(LOGGED_WRONG_PIN)).await;
-    assert_denied(&response, "Invalid PIN");
-    let consent_nonce = authorize_nonce(
+    submit_wrong_pins(&app, &client_id, LOGGED_WRONG_PIN, 1).await;
+    let approval = approve_request(
         &app,
-        &client_id,
-        "http://localhost/cb",
-        "read write",
-        "s",
-        &challenge,
+        &AuthorizeRequest {
+            scope: "read write",
+            verifier,
+            ..AuthorizeRequest::read(&client_id)
+        },
+        &[("pin", LIMITED_PIN)],
     )
     .await;
-    let response = post_approve(
-        &app,
-        &[
-            ("consent_nonce", consent_nonce.as_str()),
-            ("approved", "true"),
-            ("pin", LIMITED_PIN),
-        ],
-    )
-    .await;
-    let code = code_from_location(&location_header(&response));
+    let code = code_from_location(&location_header(&approval));
 
     // Exchange the code, then replay it.
-    let response = exchange_code(&app, &code, &client_id, "http://localhost/cb", verifier).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let first = body_to_json(response.into_body()).await;
+    let first = exchange_ok(&app, &code, &client_id, "http://localhost/cb", verifier).await;
     let access_token = first["access_token"].as_str().unwrap().to_string();
     let refresh_token = first["refresh_token"].as_str().unwrap().to_string();
     assert_invalid_grant(
@@ -2535,21 +2112,11 @@ async fn tracing_output_never_contains_tokens_codes_or_the_pin() {
 
     // Use the access token, and an unknown one.
     for bearer in [access_token.as_str(), LOGGED_UNKNOWN_BEARER] {
-        app.clone()
-            .oneshot(
-                Request::get("/test")
-                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        get_protected(&app, bearer).await;
     }
 
     // Rotate, then present the new refresh token from the wrong client.
-    let response = post_refresh(&app, &refresh_token, &[("client_id", &client_id)]).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let second = body_to_json(response.into_body()).await;
+    let second = refresh_ok(&app, &refresh_token, &client_id).await;
     let new_access_token = second["access_token"].as_str().unwrap().to_string();
     let new_refresh_token = second["refresh_token"].as_str().unwrap().to_string();
     assert_invalid_grant(post_refresh(&app, &new_refresh_token, &[("client_id", "other")]).await)
@@ -2591,13 +2158,10 @@ async fn tracing_output_never_contains_tokens_codes_or_the_pin() {
 #[tokio::test]
 async fn pin_lockout_warns_with_retry_after_and_no_pin() {
     let logs = LogCapture::start();
-    let (app, _store) = build_test_router(Some(LIMITED_PIN.into()));
+    let (app, _store) = build_test_router(Some(LIMITED_PIN));
     let client_id = register_client(&app, "http://localhost/cb").await;
 
-    for _ in 0..MAX_FAILURES {
-        let response = submit_consent(&app, &client_id, true, Some(LOGGED_WRONG_PIN)).await;
-        assert_denied(&response, "Invalid PIN");
-    }
+    submit_wrong_pins(&app, &client_id, LOGGED_WRONG_PIN, MAX_FAILURES).await;
     assert_backoff(submit_consent(&app, &client_id, true, Some(LIMITED_PIN)).await).await;
 
     let output = logs.output();

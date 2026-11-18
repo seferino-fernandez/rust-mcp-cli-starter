@@ -11,7 +11,7 @@ use crate::secret_digest::SecretDigest;
 /// The consent form posted to `POST /oauth/approve`. Everything it grants
 /// comes from the [`PendingAuthorization`] stored under `consent_nonce`.
 #[derive(Debug, Deserialize)]
-pub struct ApprovalForm {
+pub(crate) struct ApprovalForm {
     /// The single-use nonce naming the pending authorization.
     pub consent_nonce: String,
     /// The user's decision; only `"true"` approves.
@@ -23,7 +23,7 @@ pub struct ApprovalForm {
 /// An authorization request `GET /oauth/authorize` has validated, held until
 /// the consent form is posted with its nonce.
 #[derive(Clone, Debug)]
-pub struct PendingAuthorization {
+pub(crate) struct PendingAuthorization {
     /// The client, which must still be registered when the nonce is taken.
     /// Its name is looked up when the consent page is rendered, not copied.
     pub client_id: String,
@@ -48,7 +48,7 @@ pub struct PendingAuthorization {
 /// `/.well-known/oauth-authorization-server` and
 /// `/.well-known/openid-configuration`.
 #[derive(serde::Serialize)]
-pub struct AuthorizationServerMetadata {
+pub(crate) struct AuthorizationServerMetadata {
     /// The server's base URL.
     pub issuer: String,
     /// The `/oauth/authorize` URL.
@@ -71,7 +71,7 @@ pub struct AuthorizationServerMetadata {
 
 /// The query of a `GET /oauth/authorize` request.
 #[derive(Debug, Deserialize)]
-pub struct AuthorizeQuery {
+pub(crate) struct AuthorizeQuery {
     /// Must be `code`.
     pub response_type: String,
     /// The registered client making the request.
@@ -90,7 +90,7 @@ pub struct AuthorizeQuery {
 
 /// Shared state for all OAuth endpoint handlers.
 #[derive(Clone)]
-pub struct OAuthEndpointState {
+pub(crate) struct OAuthEndpointState {
     /// Clients, pending authorizations, codes and tokens.
     pub store: OAuthStore,
     /// The external base URL the metadata documents advertise.
@@ -105,7 +105,7 @@ pub struct OAuthEndpointState {
 /// Protected resource metadata (RFC 9728), served at
 /// `/.well-known/oauth-protected-resource`.
 #[derive(serde::Serialize)]
-pub struct ProtectedResourceMetadata {
+pub(crate) struct ProtectedResourceMetadata {
     /// The protected resource's URL.
     pub resource: String,
     /// The authorization servers that issue tokens for it.
@@ -118,7 +118,7 @@ pub struct ProtectedResourceMetadata {
 
 /// The JSON body of a `POST /oauth/register` request.
 #[derive(Debug, Deserialize)]
-pub struct RegistrationRequest {
+pub(crate) struct RegistrationRequest {
     /// A display name shown on the consent page.
     pub client_name: Option<String>,
     /// The redirect URIs the client may use.
@@ -127,7 +127,7 @@ pub struct RegistrationRequest {
 
 /// The form body of a `POST /oauth/token` request.
 #[derive(Debug, Deserialize)]
-pub struct TokenRequest {
+pub(crate) struct TokenRequest {
     /// `authorization_code` or `refresh_token`.
     pub grant_type: String,
     /// The authorization code, for the `authorization_code` grant.

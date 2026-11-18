@@ -13,7 +13,7 @@ use crate::oauth::store::OAuthStore;
 
 /// State shared with the OAuth bearer-token authentication middleware layer.
 #[derive(Clone)]
-pub struct OAuthMiddlewareState {
+pub(crate) struct OAuthMiddlewareState {
     /// The store the presented access token is looked up in.
     pub store: OAuthStore,
     /// The protected-resource metadata URL every `401` challenge names.
@@ -26,7 +26,11 @@ pub struct OAuthMiddlewareState {
 /// On success it inserts the token's [`Scopes`] into the request extensions
 /// before forwarding, so the MCP handler can enforce them per tool. No other
 /// authentication mode inserts them.
-pub async fn oauth_bearer_auth(
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "each tracing event macro scores 7: its 4 log events are 28 of the 33, the hand-written branching only 5"
+)]
+pub(crate) async fn oauth_bearer_auth(
     State(state): State<OAuthMiddlewareState>,
     mut req: Request<Body>,
     next: Next,
@@ -162,16 +166,16 @@ mod tests {
         let all: Vec<&str> = Scope::ALL.iter().map(|scope| scope.as_str()).collect();
         let expected_scope = format!("scope=\"{}\"", all.join(" "));
 
-        let (app, _store) = protected_app();
-        let missing = get_with(app, None).await;
+        let (missing_app, _missing_store) = protected_app();
+        let missing = get_with(missing_app, None).await;
         assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             challenge(&missing),
             format!("Bearer resource_metadata=\"{METADATA_URL}\", {expected_scope}")
         );
 
-        let (app, _store) = protected_app();
-        let invalid = get_with(app, Some("not-a-token")).await;
+        let (invalid_app, _invalid_store) = protected_app();
+        let invalid = get_with(invalid_app, Some("not-a-token")).await;
         assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             challenge(&invalid),

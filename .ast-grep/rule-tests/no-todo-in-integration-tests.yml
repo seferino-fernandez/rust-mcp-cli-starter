@@ -1,0 +1,8 @@
+id: no-todo-in-integration-tests
+valid:
+  - "#[test] fn ready() { assert_eq!(2 + 2, 4); }"
+  - "fn ready() { let message = \"todo!()\"; }"
+invalid:
+  - "#[test] fn unfinished() { todo!(); }"
+  - "fn helper() { unimplemented!(\"pending\"); }"
+  - "fn helper() { std::todo!(); }"

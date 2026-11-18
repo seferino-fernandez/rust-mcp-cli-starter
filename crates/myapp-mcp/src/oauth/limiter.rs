@@ -26,21 +26,21 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// Wrong PINs within [`FAILURE_WINDOW`] that start the first backoff.
-pub const MAX_FAILURES: usize = 5;
+pub(crate) const MAX_FAILURES: usize = 5;
 /// The rolling window in which wrong PINs are counted.
-pub const FAILURE_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 /// The length of the first backoff after a reset.
-pub const BASE_BACKOFF: Duration = Duration::from_secs(60);
+pub(crate) const BASE_BACKOFF: Duration = Duration::from_secs(60);
 /// The longest a backoff can grow by doubling, and so the longest a remote
 /// party can delay the owner per lockout.
-pub const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
+pub(crate) const MAX_BACKOFF: Duration = Duration::from_mins(15);
 /// Time without a failure that resets the limiter, counted from the later of
 /// the last failure and the end of the latest backoff.
-pub const QUIET_RESET: Duration = Duration::from_secs(15 * 60);
+pub(crate) const QUIET_RESET: Duration = Duration::from_mins(15);
 
 /// Counts wrong consent PINs and decides when PIN checks are refused.
 #[derive(Debug, Default)]
-pub struct PinLimiter {
+pub(crate) struct PinLimiter {
     /// Failures within the rolling window, oldest first. Only consulted until
     /// the first backoff after a reset.
     recent_failures: VecDeque<Instant>,
@@ -55,7 +55,7 @@ pub struct PinLimiter {
 impl PinLimiter {
     /// `Ok` when a PIN may be checked at `now`, or `Err` with the time left
     /// in the current backoff. A refusal changes nothing.
-    pub fn check(&mut self, now: Instant) -> Result<(), Duration> {
+    pub(crate) fn check(&mut self, now: Instant) -> Result<(), Duration> {
         self.reset_if_quiet(now);
         match self.backoff_until {
             Some(until) if until > now => Err(until.saturating_duration_since(now)),
@@ -67,7 +67,7 @@ impl PinLimiter {
     /// started, if it started one. A failure recorded during a backoff (a
     /// caller that skipped [`PinLimiter::check`]) is ignored, so it never
     /// extends the backoff.
-    pub fn record_failure(&mut self, now: Instant) -> Option<Duration> {
+    pub(crate) fn record_failure(&mut self, now: Instant) -> Option<Duration> {
         self.reset_if_quiet(now);
         if self.backoff_until.is_some_and(|until| until > now) {
             return None;
@@ -75,35 +75,35 @@ impl PinLimiter {
         self.last_failure = Some(now);
         self.failures_since_reset = self.failures_since_reset.saturating_add(1);
 
-        let backoff =
-            match self.last_backoff {
-                Some(previous) => previous.saturating_mul(2).min(MAX_BACKOFF),
-                None => {
-                    self.recent_failures.push_back(now);
-                    while self.recent_failures.front().is_some_and(|first| {
-                        now.saturating_duration_since(*first) >= FAILURE_WINDOW
-                    }) {
-                        self.recent_failures.pop_front();
-                    }
-                    if self.recent_failures.len() < MAX_FAILURES {
-                        return None;
-                    }
-                    self.recent_failures.clear();
-                    BASE_BACKOFF
-                }
-            };
+        let backoff = if let Some(previous) = self.last_backoff {
+            previous.saturating_mul(2).min(MAX_BACKOFF)
+        } else {
+            self.recent_failures.push_back(now);
+            while self
+                .recent_failures
+                .front()
+                .is_some_and(|first| now.saturating_duration_since(*first) >= FAILURE_WINDOW)
+            {
+                self.recent_failures.pop_front();
+            }
+            if self.recent_failures.len() < MAX_FAILURES {
+                return None;
+            }
+            self.recent_failures.clear();
+            BASE_BACKOFF
+        };
         self.backoff_until = Some(now.checked_add(backoff).unwrap_or(now));
         self.last_backoff = Some(backoff);
         Some(backoff)
     }
 
     /// Records a correct PIN, which resets the limiter.
-    pub fn record_success(&mut self, _now: Instant) {
+    pub(crate) fn record_success(&mut self, _now: Instant) {
         *self = Self::default();
     }
 
     /// Wrong PINs since the last reset.
-    pub fn failures_since_reset(&self) -> u32 {
+    pub(crate) fn failures_since_reset(&self) -> u32 {
         self.failures_since_reset
     }
 
@@ -123,7 +123,7 @@ impl PinLimiter {
 
 /// Whole seconds left in `remaining`, rounded up and at least 1, for a
 /// `Retry-After` header.
-pub fn retry_after_secs(remaining: Duration) -> u64 {
+pub(crate) fn retry_after_secs(remaining: Duration) -> u64 {
     let whole = remaining.as_secs();
     let rounded = if remaining.subsec_nanos() > 0 {
         whole.saturating_add(1)
@@ -285,8 +285,8 @@ mod tests {
         let started = drive_to_max_backoff(&mut limiter, Instant::now());
         let quiet = after(after(started, MAX_BACKOFF), QUIET_RESET);
         assert_eq!(limiter.check(quiet), Ok(()));
-        let (fourth, started) = fail_times(&mut limiter, quiet, 4);
-        assert_eq!(started, None, "a reset limiter needs five fresh failures");
+        let (fourth, restarted) = fail_times(&mut limiter, quiet, 4);
+        assert_eq!(restarted, None, "a reset limiter needs five fresh failures");
         assert_eq!(limiter.failures_since_reset(), 4);
         let fifth = after(fourth, secs(1));
         assert_eq!(limiter.record_failure(fifth), Some(BASE_BACKOFF));
@@ -307,21 +307,21 @@ mod tests {
         // The quiet minutes are counted after the backoff ends, not from the
         // failure that started it: just short of 15 minutes after the end,
         // the limiter is still escalated.
-        let mut limiter = PinLimiter::default();
-        let backoff_end = escalated(&mut limiter);
-        let almost = after(backoff_end, QUIET_RESET.checked_sub(secs(1)).unwrap());
-        assert_eq!(limiter.record_failure(almost), Some(secs(240)));
+        let mut still_escalated = PinLimiter::default();
+        let first_end = escalated(&mut still_escalated);
+        let almost = after(first_end, QUIET_RESET.checked_sub(secs(1)).unwrap());
+        assert_eq!(still_escalated.record_failure(almost), Some(secs(240)));
 
         // Fifteen minutes after the end, it has reset: one failure no longer
         // backs off, and the fifth starts 60 s again.
-        let mut limiter = PinLimiter::default();
-        let backoff_end = escalated(&mut limiter);
-        let quiet = after(backoff_end, QUIET_RESET);
-        assert_eq!(limiter.check(quiet), Ok(()));
-        let (_, started) = fail_times(&mut limiter, quiet, 4);
+        let mut reset = PinLimiter::default();
+        let second_end = escalated(&mut reset);
+        let quiet = after(second_end, QUIET_RESET);
+        assert_eq!(reset.check(quiet), Ok(()));
+        let (_, started) = fail_times(&mut reset, quiet, 4);
         assert_eq!(started, None);
         assert_eq!(
-            limiter.record_failure(after(quiet, secs(4))),
+            reset.record_failure(after(quiet, secs(4))),
             Some(BASE_BACKOFF)
         );
     }

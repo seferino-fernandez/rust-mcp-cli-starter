@@ -178,6 +178,24 @@ masked. Both the CLI and the MCP server show errors only through
 `Error::public_message()`, never an upstream body or URL. See the
 [`myapp-mcp` README](crates/myapp-mcp/README.md) for details.
 
+## Quality guardrails (in generated projects)
+
+`just verify` runs every check CI runs: formatting, strict Clippy lints, tests,
+docs, dependency policy, spelling, TOML style and the ast-grep rules.
+[`docs/quality-guardrails.md`](docs/quality-guardrails.md) lists each tool and
+what it catches; [`AGENTS.md`](AGENTS.md) holds the rules for coding agents.
+
+Install the tools once:
+
+```shell
+cargo install --locked just cargo-nextest cargo-deny cargo-shear typos-cli ast-grep prek
+cargo install --locked cargo-mutants   # optional: `just mutants-diff`
+prek install                           # run the fast checks on each commit
+```
+
+Tombi installs separately (see [its install guide](https://tombi-toml.github.io/tombi/docs/installation)),
+and `just dupes` needs Node.js for `npx`.
+
 ## License
 
 [MIT](LICENSE.md)

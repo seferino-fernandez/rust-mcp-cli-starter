@@ -9,12 +9,8 @@ use crate::config::OAuthCorsConfig;
 ///
 /// If origins contains `"*"`, allows all origins. Otherwise, parses each
 /// origin string as an allowed `HeaderValue`.
-pub fn oauth_cors_layer(cors_config: OAuthCorsConfig) -> CorsLayer {
-    let methods = [
-        axum::http::Method::GET,
-        axum::http::Method::POST,
-        axum::http::Method::OPTIONS,
-    ];
+pub(crate) fn oauth_cors_layer(cors_config: OAuthCorsConfig) -> CorsLayer {
+    let methods = [http::Method::GET, http::Method::POST, http::Method::OPTIONS];
 
     if cors_config.origins.iter().any(|origin| origin == "*") {
         CorsLayer::new()
@@ -24,7 +20,7 @@ pub fn oauth_cors_layer(cors_config: OAuthCorsConfig) -> CorsLayer {
     } else {
         let origins: Vec<http::HeaderValue> = cors_config
             .origins
-            .iter()
+            .into_iter()
             .filter_map(|origin| origin.parse().ok())
             .collect();
         CorsLayer::new()

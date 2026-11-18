@@ -11,8 +11,8 @@ use crate::auth::Scopes;
 // template:end oauth
 use myapp_core::{ApiClient, Config, SecretString};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities, JsonObject,
-    NumberOrString, ProtocolVersion,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities, Extensions,
+    JsonObject, NumberOrString, ProtocolVersion,
 };
 use rmcp::service::{RequestContext, serve_directly};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
@@ -68,40 +68,51 @@ pub(crate) fn tools_at(base_url: String, max_response_bytes: usize) -> AppTools 
 
 /// A request context for the selected caller. Confirmation is skipped unless
 /// [`confirmable`] marks it. The connection serving the peer closes on return.
-pub(crate) fn context(tools: &AppTools, _caller: Caller) -> RequestContext<RoleServer> {
+pub(crate) fn context(tools: &AppTools, caller: Caller) -> RequestContext<RoleServer> {
     let (server_transport, _client_transport) = tokio::io::duplex(4096);
     let running = serve_directly::<RoleServer, _, _, _, _>(tools.clone(), server_transport, None);
-    let extensions = rmcp::model::Extensions::default();
-    // template:begin http
-    let extensions = with_request_parts(extensions, _caller);
-    // template:end http
     let mut context = RequestContext::new(NumberOrString::Number(1), running.peer().clone());
-    context.extensions = extensions;
+    context.extensions = request_extensions(caller);
     context
 }
 
-// template:begin http
-fn with_request_parts(
-    mut extensions: rmcp::model::Extensions,
-    caller: Caller,
-) -> rmcp::model::Extensions {
-    if matches!(caller, Caller::Stdio) {
-        return extensions;
+/// The extensions a request from `caller` carries: none over stdio; HTTP
+/// request parts otherwise.
+fn request_extensions(caller: Caller) -> Extensions {
+    match caller {
+        Caller::Stdio => Extensions::default(),
+        // template:begin http
+        Caller::UnrestrictedHttp => with_request_parts(request_parts()),
+        // template:end http
+        // template:begin oauth
+        Caller::OAuth(scopes) => with_request_parts(scoped_request_parts(scopes)),
+        // template:end oauth
     }
-    let (parts, ()) = axum::http::Request::new(()).into_parts();
-    // template:begin oauth
-    let parts = {
-        let mut parts = parts;
-        if let Caller::OAuth(scopes) = caller {
-            parts.extensions.insert(Scopes::parse(scopes));
-        }
-        parts
-    };
-    // template:end oauth
+}
+
+// template:begin http
+/// Extensions holding `parts`, as the streamable HTTP transport attaches them.
+fn with_request_parts(parts: axum::http::request::Parts) -> Extensions {
+    let mut extensions = Extensions::default();
     extensions.insert(parts);
     extensions
 }
+
+/// The parts of an empty HTTP request.
+fn request_parts() -> axum::http::request::Parts {
+    axum::http::Request::new(()).into_parts().0
+}
 // template:end http
+// template:begin oauth
+
+/// [`request_parts`] carrying the scopes `names` grant, as the OAuth
+/// middleware attaches them.
+fn scoped_request_parts(names: &[&str]) -> axum::http::request::Parts {
+    let mut parts = request_parts();
+    parts.extensions.insert(Scopes::parse(names));
+    parts
+}
+// template:end oauth
 
 /// Marks `context` as coming from a client that can answer a confirmation:
 /// protocol 2026-07-28 with form elicitation.
@@ -117,10 +128,10 @@ pub(crate) fn confirmable(mut context: RequestContext<RoleServer>) -> RequestCon
 
 /// `arguments` as the object a tool call carries.
 pub(crate) fn arguments(arguments: Value) -> JsonObject {
-    arguments
-        .as_object()
-        .expect("tool arguments are an object")
-        .clone()
+    let Value::Object(object) = arguments else {
+        panic!("tool arguments are an object");
+    };
+    object
 }
 
 /// Calls tool `name` as `caller` through [`ServerHandler::call_tool`].
@@ -147,9 +158,11 @@ pub(crate) async fn call_tool(tools: &AppTools, name: &str, arguments: Value) ->
 /// The result a [`call`] completed with, panicking on a protocol error or a
 /// response that is not complete.
 pub(crate) fn complete(response: Result<CallToolResponse, McpError>) -> CallToolResult {
-    match response.unwrap_or_else(|error| panic!("tools/call is answered: {error:?}")) {
-        CallToolResponse::Complete(result) => result,
-        other => panic!("expected a complete response, got {other:?}"),
+    let response = response.unwrap_or_else(|error| panic!("tools/call is answered: {error:?}"));
+    if let CallToolResponse::Complete(result) = response {
+        result
+    } else {
+        panic!("expected a complete response, got {response:?}")
     }
 }
 

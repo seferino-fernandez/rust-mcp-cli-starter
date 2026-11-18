@@ -10,12 +10,16 @@ use crate::secret_digest::SecretDigest;
 
 /// The configured static bearer token, held only as its digest.
 #[derive(Clone, Debug)]
-pub struct StaticAuthToken(pub SecretDigest);
+pub(crate) struct StaticAuthToken(pub SecretDigest);
 
 /// Axum middleware that admits a request only when its `Authorization`
 /// header is `Bearer ` followed by the configured token, answering `401`
 /// otherwise.
-pub async fn static_bearer_auth(
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "each tracing event macro scores 7: its 3 log events are 21 of the 23, the hand-written branching only 2"
+)]
+pub(crate) async fn static_bearer_auth(
     State(expected): State<StaticAuthToken>,
     req: Request<Body>,
     next: Next,

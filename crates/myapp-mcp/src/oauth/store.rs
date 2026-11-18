@@ -18,29 +18,29 @@ const REFRESH_TOKEN_PREFIX: &str = "myapp_rt_";
 
 /// How long a refresh token remains valid from its issue, independent of the
 /// access token issued with it.
-const REFRESH_TOKEN_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const REFRESH_TOKEN_LIFETIME: Duration = Duration::from_hours(720);
 
 /// The most dynamically registered clients kept at once. `/oauth/register`
 /// is unauthenticated, so an unbounded map is a memory-exhaustion vector.
-pub const MAX_CLIENTS: usize = 1024;
+pub(crate) const MAX_CLIENTS: usize = 1024;
 
 /// The most pending authorizations held at once. `/oauth/authorize` is
 /// unauthenticated, so each one is attacker-sized memory until it expires.
 /// A new one past the cap evicts the oldest rather than being refused.
-pub const MAX_PENDING_AUTHORIZATIONS: usize = 1024;
+pub(crate) const MAX_PENDING_AUTHORIZATIONS: usize = 1024;
 
 /// The most pending authorizations one client holds at once. A new one past
 /// the cap evicts that client's oldest, so one client cannot crowd out
 /// another until the global cap is reached.
-pub const MAX_PENDING_PER_CLIENT: usize = 16;
+pub(crate) const MAX_PENDING_PER_CLIENT: usize = 16;
 
 /// How long a registered client is kept once it is unused: nothing has named
 /// it and it holds no live pending authorization, code or token.
-pub const CLIENT_IDLE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+pub(crate) const CLIENT_IDLE_TTL: Duration = Duration::from_hours(24);
 
 /// Configuration for the in-memory OAuth store's TTL and expiry behavior.
 #[derive(Debug, Clone)]
-pub struct OAuthStoreConfig {
+pub(crate) struct OAuthStoreConfig {
     /// How long an authorization code remains valid before expiring.
     pub auth_code_ttl: Duration,
     /// How long a pending authorization, and the consent nonce that names it,
@@ -76,7 +76,7 @@ impl Default for OAuthStoreConfig {
 
 impl OAuthStoreConfig {
     /// Build an [`OAuthStoreConfig`] from the application's [`McpConfig`](crate::config::McpConfig).
-    pub fn from_mcp_config(mcp: &crate::config::McpConfig) -> Self {
+    pub(crate) fn from_mcp_config(mcp: &crate::config::McpConfig) -> Self {
         Self {
             auth_code_ttl: Duration::from_secs(mcp.oauth_auth_code_ttl_secs),
             csrf_nonce_ttl: Duration::from_secs(mcp.oauth_csrf_nonce_ttl_secs),
@@ -89,7 +89,7 @@ impl OAuthStoreConfig {
 /// In-memory store for OAuth 2.1 state: registered clients, authorization codes,
 /// access tokens, refresh tokens, and pending authorizations.
 #[derive(Clone)]
-pub struct OAuthStore {
+pub(crate) struct OAuthStore {
     inner: Arc<Mutex<StoreInner>>,
     config: OAuthStoreConfig,
 }
@@ -211,7 +211,7 @@ impl PendingAuthorizations {
 /// A dynamically registered public OAuth client. It has no secret: it
 /// authenticates with PKCE on the authorization-code grant.
 #[derive(Clone, Debug)]
-pub struct RegisteredClient {
+pub(crate) struct RegisteredClient {
     /// The issued client identifier.
     pub client_id: String,
     /// The display name the client registered, if any.
@@ -224,7 +224,7 @@ pub struct RegisteredClient {
 
 /// A single-use authorization code issued after user consent.
 #[derive(Clone, Debug)]
-pub struct AuthCode {
+pub(crate) struct AuthCode {
     /// The client the code was issued to.
     pub client_id: String,
     /// The redirect URI the code is bound to.
@@ -241,7 +241,7 @@ pub struct AuthCode {
 
 /// An issued access token with associated metadata.
 #[derive(Clone, Debug)]
-pub struct AccessToken {
+pub(crate) struct AccessToken {
     /// The access token value.
     pub token: String,
     /// The client the token was issued to.
@@ -269,7 +269,7 @@ struct RefreshToken {
 
 /// Why [`OAuthStore::refresh_access_token`] refused a refresh token.
 #[derive(Debug, PartialEq, Eq)]
-pub enum RefreshError {
+pub(crate) enum RefreshError {
     /// The refresh token is unknown, already used, or expired.
     InvalidToken,
     /// The refresh token was presented by a client other than the one it was
@@ -362,7 +362,7 @@ impl StoreInner {
 
 impl OAuthStore {
     /// Create a new store with the given configuration.
-    pub fn new(config: OAuthStoreConfig) -> Self {
+    pub(crate) fn new(config: OAuthStoreConfig) -> Self {
         Self {
             inner: Arc::new(Mutex::new(StoreInner {
                 clients: HashMap::new(),
@@ -388,7 +388,7 @@ impl OAuthStore {
     /// [`max_clients`](OAuthStoreConfig::max_clients) even after dropping
     /// unused clients: `/oauth/register` is unauthenticated, so registration
     /// must be bounded.
-    pub fn register_client(
+    pub(crate) fn register_client(
         &self,
         client_name: Option<String>,
         redirect_uris: Vec<String>,
@@ -414,7 +414,7 @@ impl OAuthStore {
     /// Returns the client registered as `client_id` when `redirect_uri` is
     /// one of its redirect URIs, marking it used. `None` for an unknown
     /// client or an unregistered URI.
-    pub fn client_for_redirect(
+    pub(crate) fn client_for_redirect(
         &self,
         client_id: &str,
         redirect_uri: &str,
@@ -438,7 +438,7 @@ impl OAuthStore {
     /// the oldest of all is. An evicted nonce is refused at consent like an
     /// unknown one. Each step is `O(log n)` apart from the expired entries
     /// dropped.
-    pub fn begin_authorization(&self, pending: PendingAuthorization) -> String {
+    pub(crate) fn begin_authorization(&self, pending: PendingAuthorization) -> String {
         let mut inner = self.lock();
         let nonce = format!("{}{}", CONSENT_NONCE_PREFIX, Uuid::new_v4());
         let pending_authorizations = &mut inner.pending_authorizations;
@@ -455,7 +455,7 @@ impl OAuthStore {
     /// Take the pending authorization named by `nonce`, removing it. Returns
     /// `None` if the nonce is unknown, already taken, evicted, or expired, or
     /// if its client is no longer registered.
-    pub fn take_authorization(&self, nonce: &str) -> Option<PendingAuthorization> {
+    pub(crate) fn take_authorization(&self, nonce: &str) -> Option<PendingAuthorization> {
         let mut inner = self.lock();
         let entry = inner.pending_authorizations.remove(nonce)?;
         if entry.created_at.elapsed() > self.config.csrf_nonce_ttl
@@ -475,22 +475,17 @@ impl OAuthStore {
             .contains_key(nonce)
     }
 
-    /// Issue a single-use authorization code bound to the given PKCE challenge.
-    pub fn create_auth_code(
-        &self,
-        client_id: String,
-        redirect_uri: String,
-        scope: Vec<String>,
-        code_challenge: String,
-        code_challenge_method: String,
-    ) -> String {
+    /// Issue a single-use authorization code for the approved `pending`
+    /// authorization, bound to its client, redirect URI, scopes and PKCE
+    /// challenge.
+    pub(crate) fn create_auth_code(&self, pending: &PendingAuthorization) -> String {
         let code = format!("{}{}", AUTH_CODE_PREFIX, Uuid::new_v4());
         let auth_code = AuthCode {
-            client_id,
-            redirect_uri,
-            scope,
-            code_challenge,
-            code_challenge_method,
+            client_id: pending.client_id.clone(),
+            redirect_uri: pending.redirect_uri.clone(),
+            scope: pending.scopes.clone(),
+            code_challenge: pending.code_challenge.clone(),
+            code_challenge_method: pending.code_challenge_method.clone(),
             created_at: Instant::now(),
         };
         self.lock().auth_codes.insert(code.clone(), auth_code);
@@ -499,7 +494,7 @@ impl OAuthStore {
 
     /// Consume a single-use authorization code. Returns `None` if the code is
     /// invalid, already used, or expired.
-    pub fn consume_auth_code(&self, code: &str) -> Option<AuthCode> {
+    pub(crate) fn consume_auth_code(&self, code: &str) -> Option<AuthCode> {
         let mut inner = self.lock();
         let auth_code = inner.auth_codes.remove(code)?;
         if auth_code.created_at.elapsed() > self.config.auth_code_ttl {
@@ -510,13 +505,13 @@ impl OAuthStore {
     }
 
     /// Issue a new access token and refresh token pair for the given client and scopes.
-    pub fn create_access_token(&self, client_id: String, scope: Vec<String>) -> AccessToken {
+    pub(crate) fn create_access_token(&self, client_id: String, scope: Vec<String>) -> AccessToken {
         self.lock()
             .issue_token_pair(client_id, scope, self.config.token_expiry_secs)
     }
 
     /// Validate an access token. Returns `None` if the token is unknown or expired.
-    pub fn validate_access_token(&self, token: &str) -> Option<AccessToken> {
+    pub(crate) fn validate_access_token(&self, token: &str) -> Option<AccessToken> {
         let inner = self.lock();
         let access_token = inner.access_tokens.get(token)?;
         if access_token.created_at.elapsed() > Duration::from_secs(access_token.expires_in) {
@@ -533,7 +528,7 @@ impl OAuthStore {
     /// `client_id` is not the client it was issued to. A token presented by the
     /// wrong client is consumed all the same, so it cannot be used again. The
     /// access token's own expiry plays no part.
-    pub fn refresh_access_token(
+    pub(crate) fn refresh_access_token(
         &self,
         refresh_token: &str,
         client_id: &str,
@@ -567,7 +562,7 @@ impl OAuthStore {
     ///
     /// Access and refresh tokens expire independently: sweeping an expired access
     /// token leaves the refresh token issued with it usable.
-    pub fn sweep_expired(&self) {
+    pub(crate) fn sweep_expired(&self) {
         let mut inner = self.lock();
         let auth_code_ttl = self.config.auth_code_ttl;
         let csrf_nonce_ttl = self.config.csrf_nonce_ttl;
@@ -650,7 +645,7 @@ impl OAuthStore {
     /// Spawn a background task that periodically calls [`sweep_expired`](Self::sweep_expired).
     ///
     /// The task will exit cleanly when `cancel` is cancelled.
-    pub fn spawn_sweep_task(
+    pub(crate) fn spawn_sweep_task(
         self,
         interval: Duration,
         cancel: tokio_util::sync::CancellationToken,
@@ -675,7 +670,7 @@ impl OAuthStore {
 mod tests {
     use super::*;
 
-    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+    const DAY: Duration = Duration::from_hours(24);
 
     fn register(store: &OAuthStore) -> RegisteredClient {
         store
@@ -832,9 +827,9 @@ mod tests {
         let nonce = store.begin_authorization(pending);
         assert!(nonce.starts_with("myapp_consent_"));
 
-        let pending = store.take_authorization(&nonce).unwrap();
-        assert_eq!(pending.client_id, client_id);
-        assert_eq!(pending.code_challenge, "challenge123");
+        let taken = store.take_authorization(&nonce).unwrap();
+        assert_eq!(taken.client_id, client_id);
+        assert_eq!(taken.code_challenge, "challenge123");
 
         assert!(store.take_authorization(&nonce).is_none());
         assert!(store.take_authorization("myapp_consent_unknown").is_none());
@@ -963,25 +958,28 @@ mod tests {
 
         // Once many clients fill the global cap, the oldest of all goes,
         // and that is the victim's.
-        let store = OAuthStore::new(OAuthStoreConfig {
+        let capped = OAuthStore::new(OAuthStoreConfig {
             max_pending_authorizations: 4,
             max_pending_per_client: 2,
             ..Default::default()
         });
-        let victim = store.begin_authorization(pending_for("victim"));
+        let capped_victim = capped.begin_authorization(pending_for("victim"));
         for _ in 0..10 {
-            store.begin_authorization(pending_for("flooder"));
+            capped.begin_authorization(pending_for("flooder"));
         }
-        assert!(store.holds_authorization(&victim), "flooder alone");
-        store.begin_authorization(pending_for("second"));
+        assert!(capped.holds_authorization(&capped_victim), "flooder alone");
+        capped.begin_authorization(pending_for("second"));
         assert!(
-            store.holds_authorization(&victim),
+            capped.holds_authorization(&capped_victim),
             "global cap just reached"
         );
-        let newest = store.begin_authorization(pending_for("third"));
-        assert!(!store.holds_authorization(&victim), "past the global cap");
-        assert!(store.holds_authorization(&newest));
-        assert_pending_indexes_agree(&store);
+        let newest = capped.begin_authorization(pending_for("third"));
+        assert!(
+            !capped.holds_authorization(&capped_victim),
+            "past the global cap"
+        );
+        assert!(capped.holds_authorization(&newest));
+        assert_pending_indexes_agree(&capped);
     }
 
     #[test]
@@ -1022,32 +1020,29 @@ mod tests {
             csrf_nonce_ttl: Duration::ZERO,
             ..Default::default()
         });
-        let nonce = expiring.begin_authorization(pending_authorization(&expiring));
+        let expired_nonce = expiring.begin_authorization(pending_authorization(&expiring));
         std::thread::sleep(Duration::from_millis(10));
         expiring.sweep_expired();
-        assert!(!expiring.holds_authorization(&nonce));
+        assert!(!expiring.holds_authorization(&expired_nonce));
         assert_pending_indexes_agree(&expiring);
 
         let lasting = OAuthStore::new(OAuthStoreConfig::default());
-        let nonce = lasting.begin_authorization(pending_authorization(&lasting));
+        let live_nonce = lasting.begin_authorization(pending_authorization(&lasting));
         lasting.sweep_expired();
-        assert!(lasting.take_authorization(&nonce).is_some());
+        assert!(lasting.take_authorization(&live_nonce).is_some());
     }
 
     #[test]
     fn auth_code_lifecycle() {
         let store = OAuthStore::new(OAuthStoreConfig::default());
-        let code = store.create_auth_code(
-            "cid".into(),
-            "http://localhost/cb".into(),
-            vec!["read".into()],
-            "challenge123".into(),
-            "S256".into(),
-        );
+        let pending = pending_authorization(&store);
+        let code = store.create_auth_code(&pending);
         assert!(code.starts_with("myapp_ac_"));
 
         let auth_code = store.consume_auth_code(&code).unwrap();
-        assert_eq!(auth_code.client_id, "cid");
+        assert_eq!(auth_code.client_id, pending.client_id);
+        assert_eq!(auth_code.redirect_uri, "http://localhost/cb");
+        assert_eq!(auth_code.scope, ["read"]);
         assert_eq!(auth_code.code_challenge, "challenge123");
         assert_eq!(auth_code.code_challenge_method, "S256");
 
@@ -1250,7 +1245,7 @@ mod tests {
 
     #[test]
     fn rotated_refresh_token_gets_own_lifetime() {
-        let twenty_nine_days = Duration::from_secs(29 * 24 * 60 * 60);
+        let twenty_nine_days = Duration::from_hours(29 * 24);
         let store = OAuthStore::new(OAuthStoreConfig::default());
         let first_token = store.create_access_token("cid".into(), vec!["read".into()]);
         store.backdate_refresh_token(&first_token.refresh_token, twenty_nine_days);

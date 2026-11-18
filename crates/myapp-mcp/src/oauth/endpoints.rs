@@ -23,6 +23,7 @@ use crate::oauth::model::{
 use super::limiter::retry_after_secs;
 use super::pkce;
 use super::store::RefreshError;
+use crate::secret_digest::SecretDigest;
 
 const CONSENT_HTML: &str = include_str!("consent.html");
 
@@ -39,7 +40,7 @@ const CODE_CHALLENGE_CHARS: std::ops::RangeInclusive<usize> = 43..=128;
 
 /// `GET /.well-known/oauth-protected-resource`: returns resource metadata
 /// including supported scopes and authorization server references.
-pub async fn protected_resource_metadata(
+pub(crate) async fn protected_resource_metadata(
     State(state): State<Arc<OAuthEndpointState>>,
 ) -> impl IntoResponse {
     tracing::debug!("GET /.well-known/oauth-protected-resource");
@@ -54,7 +55,7 @@ pub async fn protected_resource_metadata(
 
 /// `GET /.well-known/oauth-authorization-server`: returns authorization server
 /// metadata including endpoints, supported grant types, and PKCE methods.
-pub async fn authorization_server_metadata(
+pub(crate) async fn authorization_server_metadata(
     State(state): State<Arc<OAuthEndpointState>>,
 ) -> impl IntoResponse {
     tracing::debug!("GET /.well-known/oauth-authorization-server");
@@ -95,7 +96,7 @@ pub async fn authorization_server_metadata(
 ///
 /// Of the requested scopes only `read` and `write` are kept, and `read` is
 /// granted when none are left.
-pub async fn authorize(
+pub(crate) async fn authorize(
     State(state): State<Arc<OAuthEndpointState>>,
     params: Result<Query<AuthorizeQuery>, QueryRejection>,
 ) -> Response {
@@ -122,69 +123,16 @@ pub async fn authorize(
     let Ok(redirect_url) = url::Url::parse(&params.redirect_uri) else {
         return unknown_client_response();
     };
-    if params.response_type != "code" {
-        return bad_request(
-            "unsupported_response_type",
-            "Only response_type=code is supported",
-        );
-    }
-
-    let code_challenge_method = match params.code_challenge_method {
-        Some(method) if method == "S256" => method,
-        Some(other) => {
-            return bad_request(
-                "invalid_request",
-                &format!("Unsupported code_challenge_method: {other}. Only S256 is supported."),
-            );
-        }
-        None => {
-            return bad_request(
-                "invalid_request",
-                "code_challenge and code_challenge_method=S256 are required",
-            );
-        }
-    };
-
-    let Some(code_challenge) = params.code_challenge else {
-        return bad_request("invalid_request", "code_challenge is required");
-    };
-    if !is_valid_code_challenge(&code_challenge) {
-        return bad_request(
-            "invalid_request",
-            "code_challenge must be 43 to 128 characters of A-Z, a-z, 0-9, \"-\", \".\", \"_\" \
-             and \"~\"",
-        );
-    }
-    if params
-        .state
-        .as_ref()
-        .is_some_and(|value| value.len() > MAX_STATE_BYTES)
-    {
-        return bad_request(
-            "invalid_request",
-            &format!("state must be at most {MAX_STATE_BYTES} bytes"),
-        );
-    }
-
-    let requested_scopes: Vec<String> = params
-        .scope
-        .as_deref()
-        .unwrap_or("")
-        .split_whitespace()
-        .filter(|scope| *scope == "read" || *scope == "write")
-        .map(ToString::to_string)
-        .collect();
-    let scopes = if requested_scopes.is_empty() {
-        vec!["read".to_string()]
-    } else {
-        requested_scopes
+    let (code_challenge, code_challenge_method) = match validate_authorize_params(&params) {
+        Ok(pkce) => pkce,
+        Err((error, description)) => return bad_request(error, &description),
     };
 
     let pending = PendingAuthorization {
         client_id: client.client_id,
         redirect_uri: params.redirect_uri,
         redirect_url,
-        scopes,
+        scopes: granted_scopes(params.scope.as_deref()),
         code_challenge,
         code_challenge_method,
         state: params.state,
@@ -206,6 +154,76 @@ pub async fn authorize(
         .into_response()
 }
 
+/// Checks the `response_type`, PKCE parameters and `state` of an
+/// authorization request whose client and redirect URI are already known,
+/// in that order. Returns the code challenge and its method, or the OAuth
+/// `error` and `error_description` refusing the first parameter that fails.
+fn validate_authorize_params(
+    params: &AuthorizeQuery,
+) -> Result<(String, String), (&'static str, String)> {
+    if params.response_type != "code" {
+        return Err((
+            "unsupported_response_type",
+            "Only response_type=code is supported".to_string(),
+        ));
+    }
+
+    let code_challenge_method = match params.code_challenge_method {
+        Some(ref method) if method == "S256" => method.clone(),
+        Some(ref other) => {
+            return Err((
+                "invalid_request",
+                format!("Unsupported code_challenge_method: {other}. Only S256 is supported."),
+            ));
+        }
+        None => {
+            return Err((
+                "invalid_request",
+                "code_challenge and code_challenge_method=S256 are required".to_string(),
+            ));
+        }
+    };
+
+    let Some(ref code_challenge) = params.code_challenge else {
+        return Err(("invalid_request", "code_challenge is required".to_string()));
+    };
+    if !is_valid_code_challenge(code_challenge) {
+        return Err((
+            "invalid_request",
+            "code_challenge must be 43 to 128 characters of A-Z, a-z, 0-9, \"-\", \".\", \"_\" \
+             and \"~\""
+                .to_string(),
+        ));
+    }
+    if params
+        .state
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_STATE_BYTES)
+    {
+        return Err((
+            "invalid_request",
+            format!("state must be at most {MAX_STATE_BYTES} bytes"),
+        ));
+    }
+    Ok((code_challenge.clone(), code_challenge_method))
+}
+
+/// The scopes granted for a requested space-separated `scope`: only `read`
+/// and `write` are kept, and `read` is granted when none are left.
+fn granted_scopes(scope: Option<&str>) -> Vec<String> {
+    let requested_scopes: Vec<String> = scope
+        .unwrap_or("")
+        .split_whitespace()
+        .filter(|requested| *requested == "read" || *requested == "write")
+        .map(ToString::to_string)
+        .collect();
+    if requested_scopes.is_empty() {
+        vec!["read".to_string()]
+    } else {
+        requested_scopes
+    }
+}
+
 /// `POST /oauth/approve`: processes the consent form submission. On approval,
 /// issues an authorization code and redirects to the client's `redirect_uri`.
 /// A configured PIN that is empty or whitespace-only never matches.
@@ -221,7 +239,11 @@ pub async fn authorize(
 /// `429 Too Many Requests` with `Retry-After` and the PIN is not compared.
 /// Denials and pinless approvals never touch the limiter. A form that does
 /// not deserialize is a JSON 400 that does not echo it.
-pub async fn approve(
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "each tracing event macro scores 7: its 4 log events are 28 of the 31, the hand-written branching only 3"
+)]
+pub(crate) async fn approve(
     State(state): State<Arc<OAuthEndpointState>>,
     form: Result<Form<ApprovalForm>, FormRejection>,
 ) -> Response {
@@ -262,29 +284,7 @@ pub async fn approve(
 
     if let Some(ref expected_pin) = state.oauth_pin {
         let provided_pin = form.pin.as_deref().unwrap_or("");
-        // Check, compare and record under one lock, so concurrent guesses
-        // cannot all pass `check` before any failure is recorded. Startup
-        // refuses an empty PIN; the digest never matches one either, so an
-        // empty `pin` field can never match it.
-        let outcome = {
-            let mut limiter = state
-                .pin_limiter
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let now = Instant::now();
-            match limiter.check(now) {
-                Err(remaining) => PinOutcome::Refused(remaining),
-                Ok(()) if expected_pin.matches(provided_pin) => {
-                    limiter.record_success(now);
-                    PinOutcome::Correct
-                }
-                Ok(()) => PinOutcome::Wrong {
-                    backoff: limiter.record_failure(now),
-                    failures: limiter.failures_since_reset(),
-                },
-            }
-        };
-        match outcome {
+        match check_pin(&state, expected_pin, provided_pin) {
             PinOutcome::Correct => {}
             PinOutcome::Refused(remaining) => return pin_backoff_response(remaining),
             PinOutcome::Wrong { backoff, failures } => {
@@ -305,15 +305,46 @@ pub async fn approve(
         }
     }
 
-    let code = state.store.create_auth_code(
-        pending.client_id.clone(),
-        pending.redirect_uri,
-        pending.scopes.clone(),
-        pending.code_challenge.clone(),
-        pending.code_challenge_method.clone(),
-    );
+    issue_auth_code(&state, pending)
+}
+
+/// Checks `provided_pin` against `expected_pin`, consulting and updating the
+/// global PIN limiter.
+///
+/// Check, compare and record happen under one lock, so concurrent guesses
+/// cannot all pass `check` before any failure is recorded. Startup refuses an
+/// empty PIN; the digest never matches one either, so an empty `pin` field
+/// can never match it.
+fn check_pin(
+    state: &OAuthEndpointState,
+    expected_pin: &SecretDigest,
+    provided_pin: &str,
+) -> PinOutcome {
+    let mut limiter = state
+        .pin_limiter
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let now = Instant::now();
+    match limiter.check(now) {
+        Err(remaining) => PinOutcome::Refused(remaining),
+        Ok(()) if expected_pin.matches(provided_pin) => {
+            limiter.record_success(now);
+            PinOutcome::Correct
+        }
+        Ok(()) => PinOutcome::Wrong {
+            backoff: limiter.record_failure(now),
+            failures: limiter.failures_since_reset(),
+        },
+    }
+}
+
+/// Issues an authorization code for the approved `pending` authorization and
+/// redirects to its client with the code and any `state`.
+fn issue_auth_code(state: &OAuthEndpointState, pending: PendingAuthorization) -> Response {
+    let code = state.store.create_auth_code(&pending);
     tracing::info!(scope = ?pending.scopes, "Authorization code issued");
 
+    let state_param = pending.state.as_deref().unwrap_or("");
     let mut pairs = vec![("code", code.as_str())];
     if !state_param.is_empty() {
         pairs.push(("state", state_param));
@@ -334,21 +365,7 @@ fn render_consent(
         .redirect_url
         .host_str()
         .unwrap_or_else(|| pending.redirect_url.as_str());
-    let scope_items: String = pending
-        .scopes
-        .iter()
-        .map(|scope| {
-            let label = match scope.as_str() {
-                "read" => "Read-only access to the API",
-                "write" => "Read and write access to the API",
-                other => other,
-            };
-            format!(
-                "    <div class=\"scope-item\">{}</div>\n",
-                html_escape(label)
-            )
-        })
-        .collect();
+    let scope_items = scope_items(&pending.scopes);
     let pin_field = if pin_required {
         concat!(
             "    <div class=\"pin-field\">\n",
@@ -389,6 +406,23 @@ fn render_consent(
     }
     html.push_str(rest);
     html
+}
+
+/// One HTML-escaped `scope-item` line per scope, labelled for the consent
+/// page.
+fn scope_items(scopes: &[String]) -> String {
+    let mut items = String::new();
+    for scope in scopes {
+        let label = match scope.as_str() {
+            "read" => "Read-only access to the API",
+            "write" => "Read and write access to the API",
+            other => other,
+        };
+        items.push_str("    <div class=\"scope-item\">");
+        items.push_str(&html_escape(label));
+        items.push_str("</div>\n");
+    }
+    items
 }
 
 /// Escapes `& < > " '` so `value` is inert in HTML text and quoted attributes.
@@ -439,7 +473,11 @@ fn pin_backoff_response(remaining: Duration) -> Response {
 /// `POST /oauth/token`: handles token exchange (`authorization_code`) and
 /// token refresh (`refresh_token`) grant types. A form that does not
 /// deserialize is a JSON 400 that does not echo it.
-pub async fn token(
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "each tracing event macro scores 7: its 2 log events are 14 of the 16, the hand-written branching only 2"
+)]
+pub(crate) async fn token(
     State(state): State<Arc<OAuthEndpointState>>,
     req: Result<Form<TokenRequest>, FormRejection>,
 ) -> Response {
@@ -465,6 +503,10 @@ pub async fn token(
     }
 }
 
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "each tracing event macro scores 7: its 6 log events are 42 of the 45, the hand-written branching only 3"
+)]
 fn handle_code_exchange(state: &OAuthEndpointState, req: &TokenRequest) -> Response {
     tracing::debug!(client_id = %req.client_id, "Exchanging authorization code for tokens");
 
@@ -515,6 +557,10 @@ fn handle_code_exchange(state: &OAuthEndpointState, req: &TokenRequest) -> Respo
 /// Rotates a refresh token. The request must name the client the token was
 /// issued to in `client_id`; any other value, including none, consumes the
 /// token and gets the same body as an unknown token.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "each tracing event macro scores 7: its 5 log events are 35 of the 38, the hand-written branching only 3"
+)]
 fn handle_refresh(state: &OAuthEndpointState, req: &TokenRequest) -> Response {
     tracing::debug!("Refreshing access token");
     if req.refresh_token.is_empty() {
@@ -589,7 +635,11 @@ fn token_error(error: &str, description: &str) -> Response {
 /// [`MAX_CLIENT_NAME_CHARS`], more than [`MAX_REDIRECT_URIS`] redirect URIs,
 /// or one over [`MAX_REDIRECT_URI_BYTES`] gets a JSON 400
 /// `invalid_client_metadata` that does not echo the body.
-pub async fn register(
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "each tracing event macro scores 7: its 6 log events are 42 of the 44, the hand-written branching only 2"
+)]
+pub(crate) async fn register(
     State(state): State<Arc<OAuthEndpointState>>,
     req: Result<Json<RegistrationRequest>, JsonRejection>,
 ) -> Response {

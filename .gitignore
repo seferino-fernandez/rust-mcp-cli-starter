@@ -13,3 +13,6 @@ target/
 .env.local
 .env.development
 .env.production
+
+# cargo-mutants output (`just mutants-diff`)
+mutants.out*/

@@ -158,7 +158,7 @@ async fn rate_limited_surfaces_retry_after() {
     let err = client_for(&server.uri()).get_item(9).await.unwrap_err();
     assert!(matches!(
         err,
-        myapp_core::Error::RateLimited {
+        Error::RateLimited {
             retry_after_secs: 30
         }
     ));
@@ -182,7 +182,7 @@ async fn api_error_body_is_surfaced() {
 #[tokio::test]
 async fn missing_api_key_is_rejected() {
     let err = ApiClient::new(Config::default()).unwrap_err();
-    assert!(matches!(err, myapp_core::Error::MissingApiKey));
+    assert!(matches!(err, Error::MissingApiKey));
 }
 
 #[tokio::test]

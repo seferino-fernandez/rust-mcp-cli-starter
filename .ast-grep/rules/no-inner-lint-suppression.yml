@@ -1,0 +1,17 @@
+id: no-inner-lint-suppression
+language: Rust
+severity: error
+message: Inner lint suppressions belong only in crate roots.
+ignores:
+  - crates/*/src/lib.rs
+  - crates/*/src/main.rs
+  - crates/*/src/bin/*.rs
+  - crates/*/tests/*.rs
+  - crates/*/examples/*.rs
+  - crates/*/benches/*.rs
+  - crates/*/build.rs
+rule:
+  kind: inner_attribute_item
+  has:
+    kind: attribute
+    regex: '^(expect|allow)\s*\('

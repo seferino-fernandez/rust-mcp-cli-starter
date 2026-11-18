@@ -14,7 +14,7 @@ use subtle::ConstantTimeEq;
 /// depends on the length of the provided value. A configured value that is
 /// empty or whitespace-only never matches anything.
 #[derive(Clone)]
-pub struct SecretDigest {
+pub(crate) struct SecretDigest {
     digest: [u8; 32],
     blank: bool,
 }
@@ -22,7 +22,7 @@ pub struct SecretDigest {
 impl SecretDigest {
     /// Digests `configured`, remembering whether it was empty or
     /// whitespace-only.
-    pub fn new(configured: &str) -> Self {
+    pub(crate) fn new(configured: &str) -> Self {
         Self {
             digest: Sha256::digest(configured.as_bytes()).into(),
             blank: configured.trim().is_empty(),
@@ -31,10 +31,10 @@ impl SecretDigest {
 
     /// Whether `provided` equals the configured secret. Always false when
     /// the configured secret was empty or whitespace-only.
-    pub fn matches(&self, provided: &str) -> bool {
+    pub(crate) fn matches(&self, provided: &str) -> bool {
         let provided: [u8; 32] = Sha256::digest(provided.as_bytes()).into();
         let equal: bool = self.digest.as_slice().ct_eq(provided.as_slice()).into();
-        equal & !self.blank
+        equal && !self.blank
     }
 }
 
@@ -47,6 +47,7 @@ impl fmt::Debug for SecretDigest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     #[test]
     fn accepts_only_the_configured_value() {
@@ -79,11 +80,10 @@ mod tests {
     #[test]
     fn debug_redacts_the_digest() {
         let digest = SecretDigest::new("correct-horse");
-        let hex: String = digest
-            .digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let hex = digest.digest.iter().fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").unwrap();
+            hex
+        });
         let debug = format!("{digest:?}");
         assert_eq!(debug, "SecretDigest(********)");
         assert!(!debug.contains(&hex));

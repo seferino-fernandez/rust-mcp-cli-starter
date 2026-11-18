@@ -7,11 +7,11 @@ cargo_generate_version = ">=0.26.0"
 # (cargo-generate auto-removes `cargo-generate.toml`, but we list it
 # explicitly for clarity.)
 ignore = [
-    "target",
-    "pre-script.rhai",
-    "cargo-generate.toml",
-    ".github/workflows/template.yml",
-    "scripts/check-generated.sh",
+  "target",
+  "pre-script.rhai",
+  "cargo-generate.toml",
+  ".github/workflows/template.yml",
+  "scripts/check-generated.sh",
 ]
 # Files copied verbatim, without Liquid rendering. The justfile uses just's
 # own `{{shell}}` / `{{dir}}` interpolation, which Liquid would otherwise

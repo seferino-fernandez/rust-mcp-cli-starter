@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 /// Recursively sets `additionalProperties: false` on every object schema node
 /// within a JSON Schema value: the root, nested `properties`, `items`, and any
 /// `$defs`/`definitions`. Idempotent.
-pub fn close_object_schemas(schema: &mut Value) {
+pub(super) fn close_object_schemas(schema: &mut Value) {
     match schema {
         Value::Object(map) => {
             close_object_map(map);
@@ -18,7 +18,7 @@ pub fn close_object_schemas(schema: &mut Value) {
                 close_object_schemas(item);
             }
         }
-        _ => {}
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
 }
 
@@ -30,7 +30,7 @@ pub fn close_object_schemas(schema: &mut Value) {
 /// parameterless/all-optional tools (schemars omits the key entirely when a
 /// struct has no mandatory fields), satisfying scanners that require an explicit
 /// `required` declaration. An existing `required` array is preserved verbatim.
-pub fn close_object_map(map: &mut Map<String, Value>) {
+pub(super) fn close_object_map(map: &mut Map<String, Value>) {
     let is_object_schema =
         map.get("type").and_then(Value::as_str) == Some("object") || map.contains_key("properties");
     if is_object_schema {
@@ -54,7 +54,7 @@ pub fn close_object_map(map: &mut Map<String, Value>) {
 /// request. If even that diagnostic exceeds `max_bytes`, returns a protocol
 /// error rather than break the configured cap. Returns the original result
 /// otherwise.
-pub fn enforce_response_budget(
+pub(super) fn enforce_response_budget(
     result: CallToolResult,
     max_bytes: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -248,7 +248,7 @@ mod router_tests {
 
     #[test]
     fn list_output_schema_matches_present_and_omitted_pagination() {
-        use crate::tools::types::Items;
+        use crate::tools::types::Listed;
         use myapp_core::{Redacted, models::Item, pagination::Page};
         use serde_json::json;
 
@@ -264,8 +264,8 @@ mod router_tests {
         assert!(required.contains(&json!("count")));
         assert_eq!(schema["additionalProperties"], false);
 
-        let unpaginated = Items::<Item>::new(vec![]);
-        let paginated = Items::from(Page::<Item> {
+        let unpaginated = Listed::<Item>::new(vec![]);
+        let paginated = Listed::from(Page::<Item> {
             records: vec![],
             page: 1,
             page_size: 10,
@@ -302,21 +302,23 @@ mod router_tests {
         }
     }
 
+    /// Every tool, in listing order, with the annotation hints it must carry:
+    /// read-only, destructive (left unchecked when `None`) and idempotent.
+    const EXPECTED_HINTS: [(&str, bool, Option<bool>, bool); 5] = [
+        ("myapp_create_item", false, Some(false), false),
+        ("myapp_delete_item", false, Some(true), true),
+        ("myapp_get_item", true, None, true),
+        ("myapp_get_system_status", true, None, true),
+        ("myapp_list_items", true, None, true),
+    ];
+
     #[test]
     fn tool_annotations_are_complete() {
         let tools = listed_tools();
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
-        assert_eq!(
-            names,
-            [
-                "myapp_create_item",
-                "myapp_delete_item",
-                "myapp_get_item",
-                "myapp_get_system_status",
-                "myapp_list_items",
-            ]
-        );
-        for tool in &tools {
+        let expected: Vec<&str> = EXPECTED_HINTS.iter().map(|(name, ..)| *name).collect();
+        assert_eq!(names, expected);
+        for (tool, (_, read_only, destructive, idempotent)) in tools.iter().zip(EXPECTED_HINTS) {
             assert!(
                 tool.name.starts_with("myapp_"),
                 "tool {} must carry the server prefix",
@@ -331,57 +333,25 @@ mod router_tests {
                 "tool {} must have a non-empty title",
                 tool.name
             );
-            match tool.name.as_ref() {
-                "myapp_get_system_status" | "myapp_list_items" | "myapp_get_item" => {
-                    assert_eq!(
-                        ann.idempotent_hint,
-                        Some(true),
-                        "{} must be marked idempotent",
-                        tool.name
-                    );
-                    assert_eq!(
-                        ann.read_only_hint,
-                        Some(true),
-                        "{} must be marked read-only",
-                        tool.name
-                    );
-                }
-                "myapp_create_item" => {
-                    assert_eq!(
-                        ann.read_only_hint,
-                        Some(false),
-                        "myapp_create_item must not be marked read-only"
-                    );
-                    assert_eq!(
-                        ann.destructive_hint,
-                        Some(false),
-                        "myapp_create_item must not be marked destructive"
-                    );
-                    assert_eq!(
-                        ann.idempotent_hint,
-                        Some(false),
-                        "myapp_create_item must not be marked idempotent"
-                    );
-                }
-                "myapp_delete_item" => {
-                    assert_eq!(
-                        ann.read_only_hint,
-                        Some(false),
-                        "myapp_delete_item must not be marked read-only"
-                    );
-                    assert_eq!(
-                        ann.destructive_hint,
-                        Some(true),
-                        "myapp_delete_item must be marked destructive"
-                    );
-                    assert_eq!(
-                        ann.idempotent_hint,
-                        Some(true),
-                        "myapp_delete_item must be marked idempotent"
-                    );
-                }
-                other => panic!("unexpected tool {other}"),
+            assert_eq!(
+                ann.read_only_hint,
+                Some(read_only),
+                "{} read-only hint",
+                tool.name
+            );
+            if destructive.is_some() {
+                assert_eq!(
+                    ann.destructive_hint, destructive,
+                    "{} destructive hint",
+                    tool.name
+                );
             }
+            assert_eq!(
+                ann.idempotent_hint,
+                Some(idempotent),
+                "{} idempotent hint",
+                tool.name
+            );
         }
     }
 

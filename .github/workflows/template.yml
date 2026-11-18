@@ -25,22 +25,38 @@ jobs:
             matrix:
                 transport: [stdio, http, http-oauth]
         steps:
-            - uses: actions/checkout@v7
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   lfs: true
 
-            # rustfmt must be present before generation: the pre hook runs `cargo fmt`.
+            # Installs the pinned toolchain (with clippy and rustfmt) from
+            # rust-toolchain.toml. rustfmt must be present before generation:
+            # the pre hook runs `cargo fmt`.
             - name: Install Rust toolchain
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  components: clippy,rustfmt
+              run: rustup toolchain install
 
-            # cargo-generate is installed via the cargo-binstall fallback;
-            # install-action passes github.token to it automatically.
-            - name: Install cargo-generate and cargo nextest
-              uses: taiki-e/install-action@v2
+            # Same tools and pins as the generated project's
+            # pull-request-validation.yml. cargo-generate is installed via the
+            # cargo-binstall fallback; install-action passes github.token to it.
+            - name: Install cargo-generate, nextest, cargo-shear and typos
+              uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
               with:
-                  tool: cargo-generate@0.26.0,cargo-nextest
+                  tool: cargo-generate@0.26.0,cargo-nextest@0.9.152,cargo-shear@1.14.1,typos@1.52.2
+
+            - name: Install tombi
+              uses: tombi-toml/setup-tombi@7417bd6e820cf0d4f89d77b48d13ba5d060435bf # v1.11.3
+
+            - name: Install ast-grep
+              run: npm install --global @ast-grep/cli@0.51.3
+
+            # The generated project runs cargo-deny through
+            # EmbarkStudios/cargo-deny-action, a container action that cannot
+            # see $RUNNER_TEMP, so install the same release binary it uses.
+            - name: Install cargo-deny
+              run: |
+                  curl --proto '=https' --tlsv1.2 -sSfL \
+                      https://github.com/EmbarkStudios/cargo-deny/releases/download/0.21.0/cargo-deny-0.21.0-x86_64-unknown-linux-musl.tar.gz \
+                      | tar -xz -C "$HOME/.cargo/bin" --strip-components=1 --wildcards '*/cargo-deny'
 
             # Generate outside the checkout, otherwise cargo-generate adds the
             # output to the template's own workspace.
@@ -62,7 +78,7 @@ jobs:
                       --destination "$RUNNER_TEMP"
                   echo "PROJECT_DIR=$RUNNER_TEMP/$PROJECT_NAME" >> "$GITHUB_ENV"
 
-            - uses: Swatinem/rust-cache@v2
+            - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with:
                   workspaces: ${{ env.PROJECT_DIR }}
                   key: template-${{ matrix.transport }}
@@ -85,7 +101,7 @@ jobs:
               working-directory: ${{ env.PROJECT_DIR }}
               run: |
                   status=0
-                  for f in pre-script.rhai cargo-generate.toml README.generated.md .github/workflows/template.yml; do
+                  for f in pre-script.rhai cargo-generate.toml README.generated.md AGENTS.generated.md .github/workflows/template.yml; do
                       if [ -e "$f" ]; then
                           echo "::error::Template file '$f' should not exist in the generated project"
                           status=1
@@ -125,21 +141,53 @@ jobs:
 
             - name: Run cargo clippy
               working-directory: ${{ env.PROJECT_DIR }}
-              run: cargo clippy --all-targets --all-features -- -D warnings
+              run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-            - name: Run tests
+            - name: Run tests (all features)
               working-directory: ${{ env.PROJECT_DIR }}
-              run: cargo nextest run --all-targets --all-features
+              run: cargo nextest run --locked --workspace --all-targets --all-features
+
+            - name: Run tests (default features)
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: cargo nextest run --locked --workspace
 
             - name: Run doc tests
               working-directory: ${{ env.PROJECT_DIR }}
-              run: cargo test --doc
+              run: cargo test --locked --workspace --doc
 
             - name: Check generated CLI surface
               run: bash scripts/check-generated.sh "$PROJECT_DIR" "${{ matrix.transport }}" cli
 
             - name: Build docs
               working-directory: ${{ env.PROJECT_DIR }}
-              run: cargo doc --no-deps --all-features
+              run: cargo doc --locked --workspace --no-deps --all-features
               env:
                   RUSTDOCFLAGS: -D warnings
+
+            - name: Run cargo deny
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: cargo deny --all-features check
+
+            - name: Run cargo shear
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: cargo shear
+
+            - name: Run typos
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: typos
+
+            - name: Check TOML formatting
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: tombi format --check
+
+            - name: Lint TOML
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: tombi lint --error-on-warnings
+
+            - name: Run ast-grep rules
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: ast-grep scan --format github
+
+            - name: Test ast-grep rules
+              working-directory: ${{ env.PROJECT_DIR }}
+              run: ast-grep test

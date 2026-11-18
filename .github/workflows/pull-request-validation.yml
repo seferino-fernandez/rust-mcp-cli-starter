@@ -16,52 +16,119 @@ env:
     RUSTFLAGS: -D warnings
     CARGO_PROFILE_TEST_DEBUG: 0
 
+# Every action is pinned to a commit SHA (checked by the ast-grep rule
+# `actions-pinned-by-sha`); Dependabot bumps the SHA and its `# vX` comment.
+# Each job installs the toolchain from rust-toolchain.toml with
+# `rustup toolchain install`, so CI and local builds use the same Rust.
 jobs:
     test:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v7
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   lfs: true
 
             - name: Install Rust toolchain
-              uses: dtolnay/rust-toolchain@stable
+              run: rustup toolchain install
 
             - name: Install cargo nextest
-              uses: taiki-e/install-action@cargo-nextest
+              uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+              with:
+                  tool: cargo-nextest@0.9.152
 
-            - uses: Swatinem/rust-cache@v2
+            - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
             - name: Compile
-              run: cargo check --locked
+              run: cargo check --locked --workspace
 
-            - name: Run tests
-              run: cargo nextest run --all-targets --all-features
+            - name: Run tests (all features)
+              run: cargo nextest run --locked --workspace --all-targets --all-features
+
+            - name: Run tests (default features)
+              run: cargo nextest run --locked --workspace
 
             - name: Run doc tests
-              run: cargo test --doc
+              run: cargo test --locked --workspace --doc
 
             - name: Build docs
-              run: cargo doc --no-deps --all-features
+              run: cargo doc --locked --workspace --no-deps --all-features
               env:
                   RUSTDOCFLAGS: -D warnings
 
     lint:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v7
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   lfs: true
 
             - name: Install Rust toolchain
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  components: clippy,rustfmt
+              run: rustup toolchain install
 
-            - uses: Swatinem/rust-cache@v2
+            - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
             - name: Run cargo fmt
               run: cargo fmt --all --check
 
             - name: Run cargo clippy
-              run: cargo clippy --all-targets --all-features -- -D warnings
+              run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+    # Dependency policy (deny.toml) and unused dependencies.
+    dependencies:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Install Rust toolchain
+              run: rustup toolchain install
+
+            - name: Run cargo deny
+              uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
+
+            - name: Install cargo shear
+              uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+              with:
+                  tool: cargo-shear@1.14.1
+
+            - name: Run cargo shear
+              run: cargo shear
+
+    # Spelling, TOML formatting and lint, and ast-grep rules (with their tests).
+    hygiene:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Run typos
+              uses: crate-ci/typos@276087d9a4f06398b3e04825487805e2d7375888 # v1.52.2
+
+            - name: Install tombi
+              uses: tombi-toml/setup-tombi@7417bd6e820cf0d4f89d77b48d13ba5d060435bf # v1.11.3
+
+            - name: Check TOML formatting
+              run: tombi format --check
+
+            - name: Lint TOML
+              run: tombi lint --error-on-warnings
+
+            - name: Install ast-grep
+              run: npm install --global @ast-grep/cli@0.51.3
+
+            - name: Run ast-grep rules
+              run: ast-grep scan --format github
+
+            - name: Test ast-grep rules
+              run: ast-grep test
+
+    # Fail when a pull request adds code duplicated elsewhere in crates/.
+    # Compares against the base branch, so existing clones never fail a PR.
+    dupes:
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  fetch-depth: 0
+
+            - name: Check for new clones
+              run: npx --yes jscpd@5.4.3 --baseline-from-ref "origin/${{ github.base_ref }}" --fail-on-new-clones=0 crates

@@ -27,7 +27,8 @@ pub(crate) fn format_tool_error(error: &Error) -> String {
 /// paginated list also carries the totals the model needs to fetch further
 /// pages.
 #[derive(Debug, Serialize, JsonSchema)]
-pub(crate) struct Items<T> {
+#[schemars(rename = "Items")]
+pub(crate) struct Listed<T> {
     /// The listed items.
     pub items: Vec<T>,
     /// The number of items in `items`.
@@ -43,7 +44,7 @@ pub(crate) struct Items<T> {
     pub total_records: Option<u32>,
 }
 
-impl<T> Items<T> {
+impl<T> Listed<T> {
     /// Wraps an unpaginated list, recording its length as `count`.
     #[cfg_attr(
         not(test),
@@ -52,7 +53,7 @@ impl<T> Items<T> {
             reason = "template helper for unpaginated list tools in generated projects"
         )
     )]
-    pub fn new(items: Vec<T>) -> Self {
+    pub(super) fn new(items: Vec<T>) -> Self {
         Self {
             count: items.len(),
             items,
@@ -63,7 +64,7 @@ impl<T> Items<T> {
     }
 }
 
-impl<T> From<Page<T>> for Items<T> {
+impl<T> From<Page<T>> for Listed<T> {
     /// Wraps one upstream page, keeping its pagination totals.
     fn from(page: Page<T>) -> Self {
         Self {
@@ -89,7 +90,7 @@ pub(crate) struct DeleteResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{Items, format_tool_error};
+    use super::{Listed, format_tool_error};
     use myapp_core::Error;
     use serde_json::json;
 
@@ -97,7 +98,7 @@ mod tests {
 
     #[test]
     fn unpaginated_items_omit_the_page_fields() {
-        let items = Items::new(vec![1, 2, 3]);
+        let items = Listed::new(vec![1, 2, 3]);
         assert_eq!(
             serde_json::to_value(items).unwrap(),
             json!({ "items": [1, 2, 3], "count": 3 })

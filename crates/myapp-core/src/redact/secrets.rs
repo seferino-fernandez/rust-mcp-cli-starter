@@ -68,21 +68,22 @@ impl<'secret> PreparedSecrets<'secret> {
                     *string = scrubbed;
                 }
             }
-            serde_json::Value::Array(values) => {
-                for value in values {
-                    self.scrub_json(value);
+            serde_json::Value::Array(elements) => {
+                for element in elements {
+                    self.scrub_json(element);
                 }
             }
             serde_json::Value::Object(object) => {
-                for value in object.values_mut() {
-                    self.scrub_json(value);
+                for member in object.values_mut() {
+                    self.scrub_json(member);
                 }
                 rename_keys(object, |key| match self.scrub(key) {
                     Cow::Borrowed(_) => None,
                     Cow::Owned(scrubbed) => Some(scrubbed),
                 });
             }
-            _ => {}
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
         }
     }
 

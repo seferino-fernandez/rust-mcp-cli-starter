@@ -202,14 +202,20 @@ fn service_factory(
 }
 
 /// Builds the shared tool handler for the HTTP transport.
-fn http_tools(config: &ServerConfig, _auth: &HttpAuth) -> anyhow::Result<AppTools> {
-    let tools = AppTools::new(create_api_client(config)?, config.mcp.max_response_bytes)
-        .with_confirm_destructive(config.mcp.confirm_destructive);
-    // template:begin oauth
-    let tools = tools.with_require_scopes(matches!(_auth, HttpAuth::OAuth(_)));
-    // template:end oauth
-    Ok(tools)
+fn http_tools(config: &ServerConfig) -> anyhow::Result<AppTools> {
+    Ok(
+        AppTools::new(create_api_client(config)?, config.mcp.max_response_bytes)
+            .with_confirm_destructive(config.mcp.confirm_destructive),
+    )
 }
+
+// template:begin oauth
+/// Makes `tools` require token scopes exactly when `auth` is OAuth.
+fn require_oauth_scopes(tools: AppTools, auth: &HttpAuth) -> AppTools {
+    tools.with_require_scopes(matches!(auth, HttpAuth::OAuth(_)))
+}
+
+// template:end oauth
 
 /// Shares the transport policy between the listener and wire-level tests.
 fn streamable_config(
@@ -228,21 +234,164 @@ fn streamable_config(
         .with_allowed_hosts(config.allowed_hosts.clone())
 }
 
+/// The streamable HTTP service mounted at `/mcp`.
+type McpService = StreamableHttpService<AppTools, LocalSessionManager>;
+
+/// Routes `/mcp` behind the static bearer `token`.
+fn token_router(service: McpService, token: &SecretString) -> axum::Router {
+    tracing::info!("Using static bearer token authentication");
+    axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(middleware::from_fn_with_state(
+            StaticAuthToken(SecretDigest::new(token.expose_secret())),
+            static_bearer_auth,
+        ))
+}
+
+// template:begin oauth
+/// Routes `/mcp` behind OAuth bearer tokens, alongside the OAuth metadata and
+/// authorization endpoints, and starts the store's expiry sweep, which stops
+/// when `cancellation_token` is cancelled.
+fn oauth_router(
+    mcp: &McpConfig,
+    OAuthSettings { base_url, pin }: OAuthSettings,
+    service: McpService,
+    cancellation_token: &CancellationToken,
+) -> axum::Router {
+    tracing::info!("Using OAuth 2.1 authentication with PKCE");
+    let store_config = OAuthStoreConfig::from_mcp_config(mcp);
+    let sweep_interval = Duration::from_secs(mcp.oauth_sweep_interval_secs);
+    let store = OAuthStore::new(store_config);
+
+    store
+        .clone()
+        .spawn_sweep_task(sweep_interval, cancellation_token.child_token());
+
+    let endpoint_state = Arc::new(OAuthEndpointState {
+        store: store.clone(),
+        base_url: base_url.clone(),
+        oauth_pin: pin
+            .as_ref()
+            .map(|secret| SecretDigest::new(secret.expose_secret())),
+        pin_limiter: Arc::default(),
+    });
+
+    let middleware_state = OAuthMiddlewareState {
+        store,
+        resource_metadata_url: format!("{base_url}/.well-known/oauth-protected-resource"),
+    };
+
+    tracing::debug!(
+        %base_url,
+        pin_required = endpoint_state.oauth_pin.is_some(),
+        "OAuth routes configured"
+    );
+
+    let cors_layer = oauth_cors_layer(mcp.oauth_cors.clone());
+    let oauth_routes = oauth_endpoint_routes()
+        .layer(cors_layer)
+        .with_state(endpoint_state);
+
+    let mcp_routes =
+        axum::Router::new()
+            .nest_service("/mcp", service)
+            .layer(middleware::from_fn_with_state(
+                middleware_state,
+                oauth_bearer_auth,
+            ));
+
+    oauth_routes.merge(mcp_routes)
+}
+
+/// The OAuth metadata and authorization endpoints, awaiting their state.
+fn oauth_endpoint_routes() -> axum::Router<Arc<OAuthEndpointState>> {
+    axum::Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::endpoints::protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth::endpoints::protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::endpoints::authorization_server_metadata)
+                .options(oauth::endpoints::authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/openid-configuration",
+            get(oauth::endpoints::authorization_server_metadata)
+                .options(oauth::endpoints::authorization_server_metadata),
+        )
+        .route("/oauth/authorize", get(oauth::endpoints::authorize))
+        .route("/oauth/approve", post(oauth::endpoints::approve))
+        .route(
+            "/oauth/token",
+            post(oauth::endpoints::token).options(oauth::endpoints::token),
+        )
+        .route(
+            "/oauth/register",
+            post(oauth::endpoints::register).options(oauth::endpoints::register),
+        )
+}
+
+// template:end oauth
+/// Routes `/mcp` with no authentication.
+fn unauthenticated_router(service: McpService) -> axum::Router {
+    tracing::warn!("Running with auth_mode=none: no authentication on MCP endpoints");
+    axum::Router::new().nest_service("/mcp", service)
+}
+
+/// Warns that the server is reachable beyond loopback at `addr` and, when
+/// `allowed_hosts` is still the loopback default, that requests carrying a
+/// public hostname will be refused.
+fn warn_non_loopback_bind(mcp: &McpConfig, addr: SocketAddr) {
+    tracing::warn!(
+        "MCP server binding to non-loopback address {}. \
+         Ensure network access is intentional and properly secured.",
+        addr
+    );
+    // Warn rather than fail: binding 0.0.0.0 inside a container while being
+    // addressed as localhost is legitimate. But if the Host header carries a
+    // public hostname, rmcp's DNS-rebinding guard rejects the request with
+    // 403 before it reaches a handler, which is hard to diagnose blind.
+    if mcp.allowed_hosts == McpConfig::default().allowed_hosts {
+        warn_loopback_allowed_hosts(mcp, addr);
+    }
+}
+
+/// Warns that `allowed_hosts` still holds the loopback default while the
+/// server binds the non-loopback `addr`.
+fn warn_loopback_allowed_hosts(mcp: &McpConfig, addr: SocketAddr) {
+    tracing::warn!(
+        "[mcp] allowed_hosts is still the loopback default {:?} while \
+         binding to {}. Requests whose Host header is not in that list \
+         will be rejected with 403. Set [mcp] allowed_hosts (or \
+         MYAPP_MCP_ALLOWED_HOSTS) to your public hostname(s).",
+        mcp.allowed_hosts,
+        addr
+    );
+}
+
 /// Serves the MCP server over streamable HTTP on `[mcp] host` and `port`,
 /// with the configured authentication, until SIGINT or SIGTERM.
 ///
 /// Fails when the bind address is invalid, the authentication settings are
 /// refused, the API client cannot be built, or the listener cannot
 /// bind.
-pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
+pub(crate) async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     let addr = listen_addr(&config.mcp.host, config.mcp.port)?;
     let auth = HttpAuth::resolve(config, &addr)?;
 
-    let tools = http_tools(config, &auth)?;
+    let tools = http_tools(config)?;
+    // template:begin oauth
+    let tools = require_oauth_scopes(tools, &auth);
+    // template:end oauth
 
     let cancellation_token = CancellationToken::new();
     let session_manager: Arc<LocalSessionManager> = Arc::default();
-    let service: StreamableHttpService<AppTools, LocalSessionManager> = StreamableHttpService::new(
+    let service: McpService = StreamableHttpService::new(
         service_factory(tools),
         session_manager,
         streamable_config(&config.mcp, &cancellation_token),
@@ -250,119 +399,34 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
 
     tracing::debug!(auth_mode = %config.mcp.auth_mode, "Building router");
     let router = match auth {
-        HttpAuth::Token(token) => {
-            tracing::info!("Using static bearer token authentication");
-            axum::Router::new()
-                .nest_service("/mcp", service)
-                .layer(middleware::from_fn_with_state(
-                    StaticAuthToken(SecretDigest::new(token.expose_secret())),
-                    static_bearer_auth,
-                ))
-        }
+        HttpAuth::Token(token) => token_router(service, &token),
         // template:begin oauth
-        HttpAuth::OAuth(OAuthSettings { base_url, pin }) => {
-            tracing::info!("Using OAuth 2.1 authentication with PKCE");
-            let store_config = OAuthStoreConfig::from_mcp_config(&config.mcp);
-            let sweep_interval = Duration::from_secs(config.mcp.oauth_sweep_interval_secs);
-            let store = OAuthStore::new(store_config);
-
-            store
-                .clone()
-                .spawn_sweep_task(sweep_interval, cancellation_token.child_token());
-
-            let endpoint_state = Arc::new(OAuthEndpointState {
-                store: store.clone(),
-                base_url: base_url.clone(),
-                oauth_pin: pin
-                    .as_ref()
-                    .map(|secret| SecretDigest::new(secret.expose_secret())),
-                pin_limiter: Arc::default(),
-            });
-
-            let middleware_state = OAuthMiddlewareState {
-                store,
-                resource_metadata_url: format!("{base_url}/.well-known/oauth-protected-resource"),
-            };
-
-            tracing::debug!(
-                %base_url,
-                pin_required = endpoint_state.oauth_pin.is_some(),
-                "OAuth routes configured"
-            );
-
-            let cors_layer = oauth_cors_layer(config.mcp.oauth_cors.clone());
-
-            let oauth_routes = axum::Router::new()
-                .route(
-                    "/.well-known/oauth-protected-resource",
-                    get(oauth::endpoints::protected_resource_metadata),
-                )
-                .route(
-                    "/.well-known/oauth-protected-resource/mcp",
-                    get(oauth::endpoints::protected_resource_metadata),
-                )
-                .route(
-                    "/.well-known/oauth-authorization-server",
-                    get(oauth::endpoints::authorization_server_metadata)
-                        .options(oauth::endpoints::authorization_server_metadata),
-                )
-                .route(
-                    "/.well-known/openid-configuration",
-                    get(oauth::endpoints::authorization_server_metadata)
-                        .options(oauth::endpoints::authorization_server_metadata),
-                )
-                .route("/oauth/authorize", get(oauth::endpoints::authorize))
-                .route("/oauth/approve", post(oauth::endpoints::approve))
-                .route(
-                    "/oauth/token",
-                    post(oauth::endpoints::token).options(oauth::endpoints::token),
-                )
-                .route(
-                    "/oauth/register",
-                    post(oauth::endpoints::register).options(oauth::endpoints::register),
-                )
-                .layer(cors_layer)
-                .with_state(endpoint_state);
-
-            let mcp_routes = axum::Router::new().nest_service("/mcp", service).layer(
-                middleware::from_fn_with_state(middleware_state, oauth_bearer_auth),
-            );
-
-            oauth_routes.merge(mcp_routes)
+        HttpAuth::OAuth(settings) => {
+            oauth_router(&config.mcp, settings, service, &cancellation_token)
         }
         // template:end oauth
-        HttpAuth::None => {
-            tracing::warn!("Running with auth_mode=none: no authentication on MCP endpoints");
-            axum::Router::new().nest_service("/mcp", service)
-        }
+        HttpAuth::None => unauthenticated_router(service),
     };
 
     if !addr.ip().is_loopback() {
-        tracing::warn!(
-            "MCP server binding to non-loopback address {}. \
-             Ensure network access is intentional and properly secured.",
-            addr
-        );
-        // Warn rather than fail: binding 0.0.0.0 inside a container while being
-        // addressed as localhost is legitimate. But if the Host header carries a
-        // public hostname, rmcp's DNS-rebinding guard rejects the request with
-        // 403 before it reaches a handler, which is hard to diagnose blind.
-        if config.mcp.allowed_hosts == McpConfig::default().allowed_hosts {
-            tracing::warn!(
-                "[mcp] allowed_hosts is still the loopback default {:?} while \
-                 binding to {}. Requests whose Host header is not in that list \
-                 will be rejected with 403. Set [mcp] allowed_hosts (or \
-                 MYAPP_MCP_ALLOWED_HOSTS) to your public hostname(s).",
-                config.mcp.allowed_hosts,
-                addr
-            );
-        }
+        warn_non_loopback_bind(&config.mcp, addr);
     }
 
+    listen(addr, router, config.mcp.auth_mode, cancellation_token).await
+}
+
+/// Binds `addr` and serves `router` until SIGINT or SIGTERM, which cancels
+/// `cancellation_token`.
+async fn listen(
+    addr: SocketAddr,
+    router: axum::Router,
+    auth_mode: AuthMode,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<()> {
     tracing::info!(
         "Starting HTTP MCP server on {} (auth_mode={})",
         addr,
-        config.mcp.auth_mode
+        auth_mode
     );
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, router)
@@ -378,35 +442,42 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
 /// SIGTERM handling matters for container orchestrators (Docker, Kubernetes) that
 /// request graceful shutdown via SIGTERM before escalating to SIGKILL.
 async fn shutdown_signal(cancellation_token: CancellationToken) {
-    let ctrl_c = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::error!(%error, "failed to install SIGINT handler");
-            std::future::pending::<()>().await;
-        }
+    let signal = tokio::select! {
+        () = interrupt() => "SIGINT",
+        () = terminate() => "SIGTERM",
     };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => {
-                tracing::error!(%error, "failed to install SIGTERM handler");
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => tracing::info!("Received SIGINT, shutting down HTTP MCP server"),
-        () = terminate => tracing::info!("Received SIGTERM, shutting down HTTP MCP server"),
-    }
+    tracing::info!("Received {signal}, shutting down HTTP MCP server");
 
     cancellation_token.cancel();
+}
+
+/// Resolves on SIGINT (Ctrl+C); never resolves if the handler cannot be
+/// installed.
+async fn interrupt() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::error!(%error, "failed to install SIGINT handler");
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Resolves on SIGTERM; never resolves if the handler cannot be installed.
+#[cfg(unix)]
+async fn terminate() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut signal) => {
+            signal.recv().await;
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to install SIGTERM handler");
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Never resolves: there is no SIGTERM off Unix.
+#[cfg(not(unix))]
+async fn terminate() {
+    std::future::pending::<()>().await;
 }
 
 #[cfg(test)]
@@ -424,7 +495,7 @@ mod tests {
     ) -> Option<String> {
         let cors_layer = oauth_cors_layer(cors_config.clone());
         let router = axum::Router::new()
-            .route("/test", axum::routing::get(|| async { "ok" }))
+            .route("/test", get(|| async { "ok" }))
             .layer(cors_layer);
 
         let request = axum::http::Request::builder()
@@ -748,7 +819,7 @@ mod tests {
             (HttpAuth::Token(SecretString::from("s3cret")), false),
             (HttpAuth::None, false),
         ] {
-            let tools = http_tools(&config, &auth).unwrap();
+            let tools = require_oauth_scopes(http_tools(&config).unwrap(), &auth);
             assert_eq!(tools.require_scopes, required, "{auth:?}");
             assert!(!tools.confirm_destructive, "{auth:?}");
         }
@@ -833,7 +904,7 @@ mod wire_tests {
         // `tools/list` ever calls the upstream API, so these tests need no
         // network and no mock server.
         let core_config = myapp_core::Config {
-            api_key: Some(myapp_core::SecretString::from("test-key")),
+            api_key: Some(SecretString::from("test-key")),
             ..myapp_core::Config::default()
         };
         let client = myapp_core::ApiClient::new(core_config).expect("client builds");
@@ -1012,7 +1083,7 @@ mod wire_tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             let shutdown = CancellationToken::new();
             let sessions = Arc::new(LocalSessionManager::default());
-            let service = mcp_service_with_shutdown(&shutdown, sessions.clone());
+            let service = mcp_service_with_shutdown(&shutdown, Arc::clone(&sessions));
             let (status, headers, _) = post(&service, initialize(V_LEGACY), None, None).await;
             assert!(status.is_success());
             let session = headers.get("mcp-session-id").unwrap().to_str().unwrap();
@@ -1023,9 +1094,9 @@ mod wire_tests {
                 None,
             )
             .await;
-            let (status, _, payloads) =
+            let (list_status, _, payloads) =
                 post(&service, legacy_tools_list(), Some(session), None).await;
-            assert!(status.is_success());
+            assert!(list_status.is_success());
             assert_eq!(result_of(&payloads)["tools"].as_array().unwrap().len(), 5);
 
             // Keep the service and session handle alive: dropping either must
@@ -1123,7 +1194,7 @@ mod wire_tests {
     /// A modern `tools/call` of `name` with `arguments`, with every routing
     /// header a 2026-07-28 client sends, including the `Mcp-Param-Item-Id`
     /// promoted from `id`, as `bearer`.
-    fn oauth_tool_call(name: &str, arguments: Value, bearer: &str) -> axum::http::Request<Body> {
+    fn oauth_tool_call(name: &str, arguments: &Value, bearer: &str) -> axum::http::Request<Body> {
         let mut request = axum::http::Request::builder()
             .method("POST")
             .uri("/mcp")
@@ -1193,7 +1264,7 @@ mod wire_tests {
         let mut results = Vec::new();
         for scope in ["read", "write"] {
             let token = store.create_access_token("wire-test".to_string(), vec![scope.to_string()]);
-            let request = oauth_tool_call("myapp_delete_item", json!({ "id": 7 }), &token.token);
+            let request = oauth_tool_call("myapp_delete_item", &json!({ "id": 7 }), &token.token);
             let response = app.clone().oneshot(request).await.expect("infallible");
             assert!(
                 response.status().is_success(),

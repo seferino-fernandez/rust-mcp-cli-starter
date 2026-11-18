@@ -5,7 +5,7 @@ use myapp_core::Error;
 /// Converts a core error into a CLI error carrying only
 /// [`Error::public_message`], so upstream response bodies, request URLs,
 /// transport details, and deserialization internals never reach the user.
-pub fn safe_core_error(error: Error) -> anyhow::Error {
+pub(crate) fn safe_core_error(error: &Error) -> anyhow::Error {
     anyhow::Error::msg(error.public_message().into_owned())
 }
 
@@ -31,7 +31,7 @@ mod tests {
             Error::Io(std::io::Error::other("missing.key")),
         ] {
             let expected = error.public_message().into_owned();
-            let message = format!("{:#}", safe_core_error(error));
+            let message = format!("{:#}", safe_core_error(&error));
             assert_eq!(message, expected);
             assert!(!message.contains(SENTINEL), "secret leaked: {message}");
         }

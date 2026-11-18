@@ -18,17 +18,17 @@ use super::{MASKED_VALUE, is_sensitive_object_key};
 /// for keys that collide once masked.
 pub(crate) fn redact_json(value: &mut serde_json::Value) {
     match value {
-        serde_json::Value::Array(values) => {
-            for value in values {
-                redact_json(value);
+        serde_json::Value::Array(elements) => {
+            for element in elements {
+                redact_json(element);
             }
         }
         serde_json::Value::Object(object) => {
-            for (key, value) in object.iter_mut() {
+            for (key, member) in object.iter_mut() {
                 if is_sensitive_object_key(key) {
-                    mask_strings(value);
+                    mask_strings(member);
                 } else {
-                    redact_json(value);
+                    redact_json(member);
                 }
             }
             rename_keys(object, |key| match redact_free_text(key) {
@@ -45,7 +45,7 @@ pub(crate) fn redact_json(value: &mut serde_json::Value) {
                 *string = redacted;
             }
         }
-        _ => {}
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
 
@@ -57,18 +57,18 @@ pub(crate) fn redact_json(value: &mut serde_json::Value) {
 fn mask_strings(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(string) => *string = MASKED_VALUE.to_string(),
-        serde_json::Value::Array(values) => {
-            for value in values {
-                mask_strings(value);
+        serde_json::Value::Array(elements) => {
+            for element in elements {
+                mask_strings(element);
             }
         }
         serde_json::Value::Object(object) => {
-            for value in object.values_mut() {
-                mask_strings(value);
+            for member in object.values_mut() {
+                mask_strings(member);
             }
             rename_keys(object, |_| Some(MASKED_VALUE.to_string()));
         }
-        _ => {}
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
 
@@ -143,9 +143,11 @@ mod tests {
     #[test]
     fn a_renamed_key_never_replaces_a_kept_one() {
         let mut object = serde_json::Map::new();
-        let _old = object.insert("a".to_string(), serde_json::json!(1));
-        let _old = object.insert("b".to_string(), serde_json::json!(2));
-        let _old = object.insert("b (2)".to_string(), serde_json::json!(3));
+        object.extend([
+            ("a".to_string(), serde_json::json!(1)),
+            ("b".to_string(), serde_json::json!(2)),
+            ("b (2)".to_string(), serde_json::json!(3)),
+        ]);
 
         rename_keys(&mut object, |key| (key == "a").then(|| "b".to_string()));
 

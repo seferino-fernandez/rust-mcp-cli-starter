@@ -1,0 +1,60 @@
+id: actions-pinned-by-sha
+language: yaml
+severity: error
+message: Pin workflow actions to a full 40-character lowercase commit SHA, and write mapping keys without backslash escapes or block scalars.
+files:
+  - .github/workflows/**/*.yml
+  - .github/workflows/**/*.yaml
+rule:
+  any:
+    - any:
+        - kind: flow_node
+        - kind: block_node
+      inside:
+        any:
+          - kind: block_mapping_pair
+          - kind: flow_pair
+        has:
+          field: key
+          any:
+            - regex: ^(uses|"uses"|'uses')$
+            - kind: flow_node
+              all:
+                - has:
+                    any:
+                      - kind: anchor
+                      - kind: tag
+                - has:
+                    any:
+                      - kind: plain_scalar
+                      - kind: double_quote_scalar
+                      - kind: single_quote_scalar
+                    regex: ^(uses|"uses"|'uses')$
+        field: value
+      # Block scalars are always invalid; accept only these scalar forms.
+      not:
+        has:
+          any:
+            - kind: plain_scalar
+              regex: '@[0-9a-f]{40}$'
+            - kind: double_quote_scalar
+              regex: '^".*@[0-9a-f]{40}"$'
+            - kind: single_quote_scalar
+              regex: "^'.*@[0-9a-f]{40}'$"
+    # Block-scalar mapping keys are invalid whatever they decode to, so any key
+    # written as a block scalar (with or without anchor, tag or indicator) is reported.
+    - kind: block_node
+      has:
+        kind: block_scalar
+      inside:
+        kind: block_mapping_pair
+        field: key
+    - kind: double_quote_scalar
+      regex: '\\'
+      inside:
+        kind: flow_node
+        inside:
+          any:
+            - kind: block_mapping_pair
+            - kind: flow_pair
+          field: key

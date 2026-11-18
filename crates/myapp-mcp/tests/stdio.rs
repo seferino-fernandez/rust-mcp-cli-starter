@@ -41,10 +41,13 @@ async fn stdio_protocol_exchange_and_eof_exit() {
             .unwrap();
         let mut line = String::new();
         stdout.read_line(&mut line).await.unwrap();
-        let response: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["id"], 1);
-        assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
-        assert!(response["result"]["capabilities"]["tools"].is_object());
+        let initialize_response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(initialize_response["id"], 1);
+        assert_eq!(
+            initialize_response["result"]["protocolVersion"],
+            "2025-11-25"
+        );
+        assert!(initialize_response["result"]["capabilities"]["tools"].is_object());
 
         let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
         let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
@@ -54,9 +57,9 @@ async fn stdio_protocol_exchange_and_eof_exit() {
             .unwrap();
         line.clear();
         stdout.read_line(&mut line).await.unwrap();
-        let response: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["id"], 2);
-        let tools = response["result"]["tools"].as_array().unwrap();
+        let list_response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(list_response["id"], 2);
+        let tools = list_response["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 5);
         assert!(tools.iter().any(|tool| tool["name"] == "myapp_list_items"));
 

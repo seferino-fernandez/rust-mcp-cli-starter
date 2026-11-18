@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 rust-version.workspace = true
 description = "Terminal CLI for the MYAPP API"
 readme = "README.md"
@@ -16,7 +15,7 @@ name = "myapp"
 path = "src/main.rs"
 
 [dependencies]
-myapp-core.workspace = true
+myapp-core = { workspace = true, features = ["cli"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,8 +23,6 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 clap = { workspace = true }
 clap_complete = { workspace = true }
-clap_complete_nushell = { workspace = true }
-clap_mangen = { workspace = true }
 clap-verbosity-flag = { workspace = true }
 comfy-table.workspace = true
 
